@@ -5,9 +5,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ClustersPanel } from "@/app/components/ClustersPanel";
 import { MarketsTable } from "@/app/components/MarketsTable";
 import { SettingsPanel } from "@/app/components/SettingsPanel";
-import { DEFAULT_BACKEND_URL, getState, refreshNow } from "@/app/lib/api";
+import { WalletsPanel } from "@/app/components/WalletsPanel";
+import { DEFAULT_BACKEND_URL, getState, getWallets, refreshNow } from "@/app/lib/api";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type ClientSettings } from "@/app/lib/settings";
-import type { RefreshResponse, StateResponse } from "@/app/lib/types";
+import type { RefreshResponse, StateResponse, WalletStats } from "@/app/lib/types";
 
 function fmtTs(ts: number | null | undefined): string {
   if (!ts) return "—";
@@ -23,6 +24,7 @@ export default function HomePage() {
   const [settings, setSettings] = useState<ClientSettings>(DEFAULT_SETTINGS);
   const [state, setState] = useState<StateResponse | null>(null);
   const [refresh, setRefresh] = useState<RefreshResponse | null>(null);
+  const [walletStats, setWalletStats] = useState<WalletStats[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -51,6 +53,26 @@ export default function HomePage() {
     }
     tick();
     const id = window.setInterval(tick, pollInterval);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [backendUrl, pollInterval]);
+
+  // Fetch wallet stats periodically
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchWallets() {
+      try {
+        const resp = await getWallets(backendUrl, { orderBy: "recent_accuracy_7d", limit: 50 });
+        if (cancelled) return;
+        setWalletStats(resp.wallets);
+      } catch {
+        // Silently fail - wallet stats are optional
+      }
+    }
+    fetchWallets();
+    const id = window.setInterval(fetchWallets, pollInterval * 5); // Less frequent than state
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -151,6 +173,8 @@ export default function HomePage() {
       </div>
 
       <MarketsTable markets={markets} />
+
+      <WalletsPanel wallets={walletStats} />
     </div>
   );
 }

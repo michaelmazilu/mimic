@@ -3,8 +3,10 @@ export type MarketSummary = {
   title?: string | null;
   leadingOutcome?: string | null;
   consensusPercent: number;
+  weightedConsensusPercent: number;
   totalParticipants: number;
   participants: number;
+  weightedParticipants: number;
   bandMin?: number | null;
   bandMax?: number | null;
   meanEntry?: number | null;
@@ -14,6 +16,7 @@ export type MarketSummary = {
   cooked: boolean;
   priceUnavailable: boolean;
   ready: boolean;
+  confidenceScore: number;
   updatedAt?: number | null;
 };
 
@@ -69,5 +72,33 @@ export type MarketDetailResponse = {
   conditionId: string;
   title?: string | null;
   wallets: WalletTrades[];
+};
+
+export type WalletStats = {
+  wallet: string;
+  rank?: number | null;
+  userName?: string | null;
+  leaderboardPnl?: number | null;
+  totalTrades: number;
+  wonTrades: number;
+  lostTrades: number;
+  pendingTrades: number;
+  winRate: number;
+  totalPnl: number;
+  avgRoi: number;
+  recentTrades7d: number;
+  recentWon7d: number;
+  recentAccuracy7d: number;
+  recentTrades30d: number;
+  recentWon30d: number;
+  recentAccuracy30d: number;
+  streak: number;
+  lastTradeTimestamp?: number | null;
+  updatedAt?: number | null;
+};
+
+export type WalletsListResponse = {
+  wallets: WalletStats[];
+  totalCount: number;
 };
 

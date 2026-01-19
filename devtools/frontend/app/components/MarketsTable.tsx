@@ -13,52 +13,109 @@ function fmtNum(x: number | null | undefined, digits: number = 3): string {
   return x.toFixed(digits);
 }
 
+function getConfidenceClass(score: number): string {
+  if (score >= 0.7) return "good";
+  if (score >= 0.5) return "warn";
+  return "muted";
+}
+
+function ConfidenceBar({ score }: { score: number }) {
+  const pct = Math.min(100, Math.max(0, score * 100));
+  const color = score >= 0.7 ? "#4ade80" : score >= 0.5 ? "#fbbf24" : "#94a3b8";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div
+        style={{
+          width: 50,
+          height: 6,
+          background: "rgba(255,255,255,0.1)",
+          borderRadius: 3,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: color,
+            borderRadius: 3,
+          }}
+        />
+      </div>
+      <span style={{ fontSize: 11, color }}>{fmtPct(score)}</span>
+    </div>
+  );
+}
+
 export function MarketsTable({ markets }: { markets: MarketSummary[] }) {
   return (
     <div className="glass card" style={{ flex: "1 1 820px", minWidth: 340 }}>
-      <div className="title">Markets (sorted by consensus)</div>
+      <div className="title">Markets (sorted by confidence score)</div>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+        Confidence = weighted consensus (by trader accuracy) + price tightness + freshness
+      </div>
       <div className="tableWrap" style={{ marginTop: 10 }}>
         <table>
           <thead>
             <tr>
-              <th>conditionId</th>
-              <th>leadingOutcome</th>
-              <th>consensusPercent</th>
-              <th>participants</th>
-              <th>bandMin</th>
-              <th>bandMax</th>
-              <th>stddev</th>
-              <th>cooked</th>
-              <th>ready</th>
+              <th>Market</th>
+              <th>Outcome</th>
+              <th>Confidence</th>
+              <th>Weighted</th>
+              <th>Raw</th>
+              <th>Participants</th>
+              <th>Band</th>
+              <th>Status</th>
+              <th>Ready</th>
             </tr>
           </thead>
           <tbody>
             {markets.map((m) => (
               <tr key={m.conditionId}>
-                <td style={{ maxWidth: 360 }}>
+                <td style={{ maxWidth: 320 }}>
                   <Link href={`/market/${encodeURIComponent(m.conditionId)}`}>
-                    <code>{m.conditionId}</code>
+                    <code style={{ fontSize: 11 }}>{m.conditionId.slice(0, 16)}...</code>
                   </Link>
                   {m.title ? (
-                    <div className="muted" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.25 }}>
-                      {m.title}
+                    <div className="muted" style={{ marginTop: 4, fontSize: 11, lineHeight: 1.25 }}>
+                      {m.title.length > 60 ? m.title.slice(0, 60) + "..." : m.title}
                     </div>
                   ) : null}
                 </td>
-                <td>{m.leadingOutcome ?? "—"}</td>
-                <td>{fmtPct(m.consensusPercent)}</td>
+                <td>
+                  <span className="badge">{m.leadingOutcome ?? "—"}</span>
+                </td>
+                <td>
+                  <ConfidenceBar score={m.confidenceScore} />
+                </td>
+                <td className={getConfidenceClass(m.weightedConsensusPercent)}>
+                  {fmtPct(m.weightedConsensusPercent)}
+                </td>
+                <td className="muted">{fmtPct(m.consensusPercent)}</td>
                 <td>
                   <span className="badge">
                     {m.participants}/{m.totalParticipants}
                   </span>
                 </td>
-                <td>{fmtNum(m.bandMin)}</td>
-                <td>{fmtNum(m.bandMax)}</td>
-                <td>{fmtNum(m.stddev)}</td>
-                <td className={m.cooked ? "bad" : m.priceUnavailable ? "muted" : "good"}>
-                  {m.priceUnavailable ? "n/a" : m.cooked ? "true" : "false"}
+                <td style={{ fontSize: 11 }}>
+                  {m.bandMin != null && m.bandMax != null ? (
+                    <span className={m.tightBand ? "good" : "muted"}>
+                      {fmtNum(m.bandMin, 2)}-{fmtNum(m.bandMax, 2)}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </td>
-                <td className={m.ready ? "good" : "muted"}>{m.ready ? "true" : "false"}</td>
+                <td className={m.cooked ? "bad" : m.priceUnavailable ? "muted" : "good"}>
+                  {m.priceUnavailable ? "pending" : m.cooked ? "moved" : "fresh"}
+                </td>
+                <td className={m.ready ? "good" : "muted"}>
+                  {m.ready ? (
+                    <span style={{ fontWeight: 600 }}>READY</span>
+                  ) : (
+                    "no"
+                  )}
+                </td>
               </tr>
             ))}
             {!markets.length ? (

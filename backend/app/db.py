@@ -76,8 +76,10 @@ def init_db(db_path: str) -> None:
               title TEXT,
               leading_outcome TEXT,
               consensus_percent REAL,
+              weighted_consensus_percent REAL,
               total_participants INTEGER,
               participants INTEGER,
+              weighted_participants REAL,
               band_min REAL,
               band_max REAL,
               mean_entry REAL,
@@ -87,10 +89,13 @@ def init_db(db_path: str) -> None:
               cooked INTEGER,
               price_unavailable INTEGER,
               ready INTEGER,
+              confidence_score REAL,
               updated_at INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_market_state_consensus ON computed_market_state(consensus_percent DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_state_weighted ON computed_market_state(weighted_consensus_percent DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_state_confidence ON computed_market_state(confidence_score DESC);
 
             CREATE TABLE IF NOT EXISTS computed_clusters (
               cluster_id TEXT PRIMARY KEY,
@@ -103,6 +108,53 @@ def init_db(db_path: str) -> None:
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+
+            -- Track resolved market outcomes per wallet (win/loss/pending)
+            CREATE TABLE IF NOT EXISTS wallet_outcomes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              wallet TEXT NOT NULL,
+              condition_id TEXT NOT NULL,
+              outcome TEXT NOT NULL,
+              side TEXT NOT NULL,
+              entry_price REAL,
+              exit_price REAL,
+              size REAL,
+              pnl REAL,
+              status TEXT NOT NULL DEFAULT 'pending',  -- pending, won, lost
+              entry_timestamp INTEGER,
+              resolved_timestamp INTEGER,
+              inserted_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(wallet, condition_id, outcome, entry_timestamp)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wallet_outcomes_wallet ON wallet_outcomes(wallet);
+            CREATE INDEX IF NOT EXISTS idx_wallet_outcomes_status ON wallet_outcomes(status);
+            CREATE INDEX IF NOT EXISTS idx_wallet_outcomes_resolved ON wallet_outcomes(resolved_timestamp DESC);
+
+            -- Aggregated wallet performance stats
+            CREATE TABLE IF NOT EXISTS wallet_stats (
+              wallet TEXT PRIMARY KEY,
+              total_trades INTEGER DEFAULT 0,
+              won_trades INTEGER DEFAULT 0,
+              lost_trades INTEGER DEFAULT 0,
+              pending_trades INTEGER DEFAULT 0,
+              win_rate REAL DEFAULT 0.0,
+              total_pnl REAL DEFAULT 0.0,
+              avg_roi REAL DEFAULT 0.0,
+              recent_trades_7d INTEGER DEFAULT 0,
+              recent_won_7d INTEGER DEFAULT 0,
+              recent_accuracy_7d REAL DEFAULT 0.0,
+              recent_trades_30d INTEGER DEFAULT 0,
+              recent_won_30d INTEGER DEFAULT 0,
+              recent_accuracy_30d REAL DEFAULT 0.0,
+              streak INTEGER DEFAULT 0,  -- positive = win streak, negative = loss streak
+              last_trade_timestamp INTEGER,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wallet_stats_win_rate ON wallet_stats(win_rate DESC);
+            CREATE INDEX IF NOT EXISTS idx_wallet_stats_recent_accuracy ON wallet_stats(recent_accuracy_7d DESC);
             """
         )
 
@@ -312,11 +364,12 @@ def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
     conn.executemany(
         """
         INSERT INTO computed_market_state(
-          condition_id, title, leading_outcome, consensus_percent, total_participants, participants,
+          condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
+          total_participants, participants, weighted_participants,
           band_min, band_max, mean_entry, stddev, tight_band,
-          midpoint, cooked, price_unavailable, ready, updated_at
+          midpoint, cooked, price_unavailable, ready, confidence_score, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -324,8 +377,10 @@ def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
                 r.get("title"),
                 r.get("leading_outcome"),
                 r.get("consensus_percent"),
+                r.get("weighted_consensus_percent", 0.0),
                 r.get("total_participants"),
                 r.get("participants"),
+                r.get("weighted_participants", 0.0),
                 r.get("band_min"),
                 r.get("band_max"),
                 r.get("mean_entry"),
@@ -335,6 +390,7 @@ def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
                 1 if r.get("cooked") else 0,
                 1 if r.get("price_unavailable") else 0,
                 1 if r.get("ready") else 0,
+                r.get("confidence_score", 0.0),
                 now,
             )
             for r in rows
@@ -366,10 +422,12 @@ def read_market_state(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT
-          condition_id, title, leading_outcome, consensus_percent, total_participants, participants,
-          band_min, band_max, mean_entry, stddev, tight_band, midpoint, cooked, price_unavailable, ready, updated_at
+          condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
+          total_participants, participants, weighted_participants,
+          band_min, band_max, mean_entry, stddev, tight_band, midpoint, cooked, 
+          price_unavailable, ready, confidence_score, updated_at
         FROM computed_market_state
-        ORDER BY consensus_percent DESC, participants DESC
+        ORDER BY confidence_score DESC, weighted_consensus_percent DESC, participants DESC
         """
     ).fetchall()
     out: list[dict[str, Any]] = []
@@ -380,8 +438,10 @@ def read_market_state(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "title": r["title"],
                 "leading_outcome": r["leading_outcome"],
                 "consensus_percent": r["consensus_percent"],
+                "weighted_consensus_percent": r["weighted_consensus_percent"] or 0.0,
                 "total_participants": r["total_participants"],
                 "participants": r["participants"],
+                "weighted_participants": r["weighted_participants"] or 0.0,
                 "band_min": r["band_min"],
                 "band_max": r["band_max"],
                 "mean_entry": r["mean_entry"],
@@ -391,6 +451,7 @@ def read_market_state(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "cooked": bool(r["cooked"]),
                 "price_unavailable": bool(r["price_unavailable"]),
                 "ready": bool(r["ready"]),
+                "confidence_score": r["confidence_score"] or 0.0,
                 "updated_at": r["updated_at"],
             }
         )
@@ -446,4 +507,415 @@ def get_trades_for_condition(conn: sqlite3.Connection, condition_id: str) -> lis
             }
         )
     return out
+
+
+# ============================================================================
+# Wallet Outcomes & Stats Functions
+# ============================================================================
+
+
+def upsert_wallet_outcome(
+    conn: sqlite3.Connection,
+    wallet: str,
+    condition_id: str,
+    outcome: str,
+    side: str,
+    entry_price: float | None,
+    size: float | None,
+    entry_timestamp: int | None,
+    status: str = "pending",
+    exit_price: float | None = None,
+    pnl: float | None = None,
+    resolved_timestamp: int | None = None,
+) -> None:
+    """Insert or update a wallet outcome record."""
+    now = _utc_ts()
+    conn.execute(
+        """
+        INSERT INTO wallet_outcomes(
+            wallet, condition_id, outcome, side, entry_price, exit_price, size, pnl,
+            status, entry_timestamp, resolved_timestamp, inserted_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(wallet, condition_id, outcome, entry_timestamp) DO UPDATE SET
+            exit_price = COALESCE(excluded.exit_price, wallet_outcomes.exit_price),
+            pnl = COALESCE(excluded.pnl, wallet_outcomes.pnl),
+            status = excluded.status,
+            resolved_timestamp = COALESCE(excluded.resolved_timestamp, wallet_outcomes.resolved_timestamp),
+            updated_at = excluded.updated_at
+        """,
+        (
+            wallet.lower(),
+            condition_id,
+            outcome,
+            side,
+            entry_price,
+            exit_price,
+            size,
+            pnl,
+            status,
+            entry_timestamp,
+            resolved_timestamp,
+            now,
+            now,
+        ),
+    )
+
+
+def resolve_wallet_outcome(
+    conn: sqlite3.Connection,
+    wallet: str,
+    condition_id: str,
+    winning_outcome: str,
+    resolved_timestamp: int | None = None,
+) -> int:
+    """Mark outcomes for a market as won/lost based on the winning outcome."""
+    now = _utc_ts()
+    resolved_ts = resolved_timestamp or now
+    
+    # Mark winning outcomes
+    conn.execute(
+        """
+        UPDATE wallet_outcomes
+        SET status = 'won', resolved_timestamp = ?, updated_at = ?
+        WHERE wallet = ? AND condition_id = ? AND outcome = ? AND status = 'pending'
+        """,
+        (resolved_ts, now, wallet.lower(), condition_id, winning_outcome),
+    )
+    
+    # Mark losing outcomes
+    cur = conn.execute(
+        """
+        UPDATE wallet_outcomes
+        SET status = 'lost', resolved_timestamp = ?, updated_at = ?
+        WHERE wallet = ? AND condition_id = ? AND outcome != ? AND status = 'pending'
+        """,
+        (resolved_ts, now, wallet.lower(), condition_id, winning_outcome),
+    )
+    
+    return cur.rowcount or 0
+
+
+def get_wallet_outcomes(
+    conn: sqlite3.Connection,
+    wallet: str,
+    *,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Get outcome records for a wallet."""
+    if status:
+        rows = conn.execute(
+            """
+            SELECT wallet, condition_id, outcome, side, entry_price, exit_price, size, pnl,
+                   status, entry_timestamp, resolved_timestamp, inserted_at, updated_at
+            FROM wallet_outcomes
+            WHERE wallet = ? AND status = ?
+            ORDER BY entry_timestamp DESC
+            LIMIT ?
+            """,
+            (wallet.lower(), status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT wallet, condition_id, outcome, side, entry_price, exit_price, size, pnl,
+                   status, entry_timestamp, resolved_timestamp, inserted_at, updated_at
+            FROM wallet_outcomes
+            WHERE wallet = ?
+            ORDER BY entry_timestamp DESC
+            LIMIT ?
+            """,
+            (wallet.lower(), limit),
+        ).fetchall()
+    
+    return [
+        {
+            "wallet": r["wallet"],
+            "condition_id": r["condition_id"],
+            "outcome": r["outcome"],
+            "side": r["side"],
+            "entry_price": r["entry_price"],
+            "exit_price": r["exit_price"],
+            "size": r["size"],
+            "pnl": r["pnl"],
+            "status": r["status"],
+            "entry_timestamp": r["entry_timestamp"],
+            "resolved_timestamp": r["resolved_timestamp"],
+            "inserted_at": r["inserted_at"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+def compute_and_update_wallet_stats(conn: sqlite3.Connection, wallet: str) -> dict[str, Any]:
+    """Compute and store aggregated stats for a wallet."""
+    now = _utc_ts()
+    wallet_lc = wallet.lower()
+    
+    # Time boundaries for recent stats
+    seven_days_ago = now - (7 * 24 * 60 * 60)
+    thirty_days_ago = now - (30 * 24 * 60 * 60)
+    
+    # Total stats
+    total_row = conn.execute(
+        """
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) as won,
+            SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) as lost,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+            SUM(COALESCE(pnl, 0)) as total_pnl,
+            MAX(entry_timestamp) as last_trade
+        FROM wallet_outcomes
+        WHERE wallet = ?
+        """,
+        (wallet_lc,),
+    ).fetchone()
+    
+    total_trades = total_row["total"] or 0
+    won_trades = total_row["won"] or 0
+    lost_trades = total_row["lost"] or 0
+    pending_trades = total_row["pending"] or 0
+    total_pnl = total_row["total_pnl"] or 0.0
+    last_trade_ts = total_row["last_trade"]
+    
+    resolved_trades = won_trades + lost_trades
+    win_rate = (won_trades / resolved_trades) if resolved_trades > 0 else 0.0
+    avg_roi = (total_pnl / total_trades) if total_trades > 0 else 0.0
+    
+    # 7-day stats
+    recent_7d_row = conn.execute(
+        """
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) as won
+        FROM wallet_outcomes
+        WHERE wallet = ? AND entry_timestamp >= ? AND status IN ('won', 'lost')
+        """,
+        (wallet_lc, seven_days_ago),
+    ).fetchone()
+    
+    recent_trades_7d = recent_7d_row["total"] or 0
+    recent_won_7d = recent_7d_row["won"] or 0
+    recent_accuracy_7d = (recent_won_7d / recent_trades_7d) if recent_trades_7d > 0 else 0.0
+    
+    # 30-day stats
+    recent_30d_row = conn.execute(
+        """
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) as won
+        FROM wallet_outcomes
+        WHERE wallet = ? AND entry_timestamp >= ? AND status IN ('won', 'lost')
+        """,
+        (wallet_lc, thirty_days_ago),
+    ).fetchone()
+    
+    recent_trades_30d = recent_30d_row["total"] or 0
+    recent_won_30d = recent_30d_row["won"] or 0
+    recent_accuracy_30d = (recent_won_30d / recent_trades_30d) if recent_trades_30d > 0 else 0.0
+    
+    # Calculate streak (consecutive wins or losses)
+    streak_rows = conn.execute(
+        """
+        SELECT status FROM wallet_outcomes
+        WHERE wallet = ? AND status IN ('won', 'lost')
+        ORDER BY resolved_timestamp DESC
+        LIMIT 20
+        """,
+        (wallet_lc,),
+    ).fetchall()
+    
+    streak = 0
+    if streak_rows:
+        first_status = streak_rows[0]["status"]
+        for r in streak_rows:
+            if r["status"] == first_status:
+                streak += 1 if first_status == "won" else -1
+            else:
+                break
+    
+    # Upsert stats
+    conn.execute(
+        """
+        INSERT INTO wallet_stats(
+            wallet, total_trades, won_trades, lost_trades, pending_trades,
+            win_rate, total_pnl, avg_roi,
+            recent_trades_7d, recent_won_7d, recent_accuracy_7d,
+            recent_trades_30d, recent_won_30d, recent_accuracy_30d,
+            streak, last_trade_timestamp, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(wallet) DO UPDATE SET
+            total_trades = excluded.total_trades,
+            won_trades = excluded.won_trades,
+            lost_trades = excluded.lost_trades,
+            pending_trades = excluded.pending_trades,
+            win_rate = excluded.win_rate,
+            total_pnl = excluded.total_pnl,
+            avg_roi = excluded.avg_roi,
+            recent_trades_7d = excluded.recent_trades_7d,
+            recent_won_7d = excluded.recent_won_7d,
+            recent_accuracy_7d = excluded.recent_accuracy_7d,
+            recent_trades_30d = excluded.recent_trades_30d,
+            recent_won_30d = excluded.recent_won_30d,
+            recent_accuracy_30d = excluded.recent_accuracy_30d,
+            streak = excluded.streak,
+            last_trade_timestamp = excluded.last_trade_timestamp,
+            updated_at = excluded.updated_at
+        """,
+        (
+            wallet_lc,
+            total_trades,
+            won_trades,
+            lost_trades,
+            pending_trades,
+            win_rate,
+            total_pnl,
+            avg_roi,
+            recent_trades_7d,
+            recent_won_7d,
+            recent_accuracy_7d,
+            recent_trades_30d,
+            recent_won_30d,
+            recent_accuracy_30d,
+            streak,
+            last_trade_ts,
+            now,
+        ),
+    )
+    
+    return {
+        "wallet": wallet_lc,
+        "total_trades": total_trades,
+        "won_trades": won_trades,
+        "lost_trades": lost_trades,
+        "pending_trades": pending_trades,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "avg_roi": avg_roi,
+        "recent_trades_7d": recent_trades_7d,
+        "recent_won_7d": recent_won_7d,
+        "recent_accuracy_7d": recent_accuracy_7d,
+        "recent_trades_30d": recent_trades_30d,
+        "recent_won_30d": recent_won_30d,
+        "recent_accuracy_30d": recent_accuracy_30d,
+        "streak": streak,
+        "last_trade_timestamp": last_trade_ts,
+        "updated_at": now,
+    }
+
+
+def get_wallet_stats(conn: sqlite3.Connection, wallet: str) -> dict[str, Any] | None:
+    """Get stats for a single wallet."""
+    row = conn.execute(
+        """
+        SELECT wallet, total_trades, won_trades, lost_trades, pending_trades,
+               win_rate, total_pnl, avg_roi,
+               recent_trades_7d, recent_won_7d, recent_accuracy_7d,
+               recent_trades_30d, recent_won_30d, recent_accuracy_30d,
+               streak, last_trade_timestamp, updated_at
+        FROM wallet_stats
+        WHERE wallet = ?
+        """,
+        (wallet.lower(),),
+    ).fetchone()
+    
+    if not row:
+        return None
+    
+    return {
+        "wallet": row["wallet"],
+        "total_trades": row["total_trades"],
+        "won_trades": row["won_trades"],
+        "lost_trades": row["lost_trades"],
+        "pending_trades": row["pending_trades"],
+        "win_rate": row["win_rate"],
+        "total_pnl": row["total_pnl"],
+        "avg_roi": row["avg_roi"],
+        "recent_trades_7d": row["recent_trades_7d"],
+        "recent_won_7d": row["recent_won_7d"],
+        "recent_accuracy_7d": row["recent_accuracy_7d"],
+        "recent_trades_30d": row["recent_trades_30d"],
+        "recent_won_30d": row["recent_won_30d"],
+        "recent_accuracy_30d": row["recent_accuracy_30d"],
+        "streak": row["streak"],
+        "last_trade_timestamp": row["last_trade_timestamp"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_all_wallet_stats(
+    conn: sqlite3.Connection,
+    *,
+    order_by: str = "recent_accuracy_7d",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Get stats for all wallets, ordered by specified field."""
+    valid_order_fields = {
+        "win_rate", "recent_accuracy_7d", "recent_accuracy_30d",
+        "total_pnl", "total_trades", "streak"
+    }
+    if order_by not in valid_order_fields:
+        order_by = "recent_accuracy_7d"
+    
+    rows = conn.execute(
+        f"""
+        SELECT w.wallet, w.rank, w.user_name, w.pnl as leaderboard_pnl,
+               s.total_trades, s.won_trades, s.lost_trades, s.pending_trades,
+               s.win_rate, s.total_pnl, s.avg_roi,
+               s.recent_trades_7d, s.recent_won_7d, s.recent_accuracy_7d,
+               s.recent_trades_30d, s.recent_won_30d, s.recent_accuracy_30d,
+               s.streak, s.last_trade_timestamp, s.updated_at
+        FROM wallets w
+        LEFT JOIN wallet_stats s ON w.wallet = s.wallet
+        ORDER BY COALESCE(s.{order_by}, 0) DESC, w.rank ASC NULLS LAST
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    
+    return [
+        {
+            "wallet": r["wallet"],
+            "rank": r["rank"],
+            "user_name": r["user_name"],
+            "leaderboard_pnl": r["leaderboard_pnl"],
+            "total_trades": r["total_trades"] or 0,
+            "won_trades": r["won_trades"] or 0,
+            "lost_trades": r["lost_trades"] or 0,
+            "pending_trades": r["pending_trades"] or 0,
+            "win_rate": r["win_rate"] or 0.0,
+            "total_pnl": r["total_pnl"] or 0.0,
+            "avg_roi": r["avg_roi"] or 0.0,
+            "recent_trades_7d": r["recent_trades_7d"] or 0,
+            "recent_won_7d": r["recent_won_7d"] or 0,
+            "recent_accuracy_7d": r["recent_accuracy_7d"] or 0.0,
+            "recent_trades_30d": r["recent_trades_30d"] or 0,
+            "recent_won_30d": r["recent_won_30d"] or 0,
+            "recent_accuracy_30d": r["recent_accuracy_30d"] or 0.0,
+            "streak": r["streak"] or 0,
+            "last_trade_timestamp": r["last_trade_timestamp"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
+    """Get a mapping of wallet -> recent_accuracy_7d for weighting consensus."""
+    rows = conn.execute(
+        """
+        SELECT wallet, recent_accuracy_7d, recent_trades_7d
+        FROM wallet_stats
+        WHERE recent_trades_7d >= 3
+        """
+    ).fetchall()
+    
+    return {
+        r["wallet"]: r["recent_accuracy_7d"]
+        for r in rows
+    }
 

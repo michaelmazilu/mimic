@@ -64,6 +64,80 @@ def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
     return band_min, band_max, mean, stddev
 
 
+def _compute_weighted_consensus(
+    recs: list[dict[str, Any]],
+    leading_outcome: str,
+    accuracy_map: dict[str, float],
+    default_weight: float = 0.5,
+) -> tuple[float, float]:
+    """
+    Compute weighted consensus based on trader accuracy.
+    
+    Returns:
+        (weighted_consensus_percent, weighted_participants)
+    
+    Formula: weighted_signal = sum(trader_accuracy * trader_vote) / sum(trader_accuracy)
+    Where trader_vote = 1 if voting for leading outcome, 0 otherwise.
+    """
+    total_weight = 0.0
+    leading_weight = 0.0
+    
+    for rec in recs:
+        wallet = rec["wallet"].lower()
+        # Use trader's recent accuracy as weight, or default if not available
+        accuracy = accuracy_map.get(wallet, default_weight)
+        # Ensure minimum weight to avoid division issues
+        weight = max(accuracy, 0.1)
+        
+        total_weight += weight
+        if rec["outcome"] == leading_outcome:
+            leading_weight += weight
+    
+    if total_weight == 0:
+        return 0.0, 0.0
+    
+    weighted_consensus = leading_weight / total_weight
+    return weighted_consensus, leading_weight
+
+
+def _compute_confidence_score(
+    weighted_consensus: float,
+    consensus_percent: float,
+    tight_band: bool,
+    cooked: bool,
+    participants: int,
+) -> float:
+    """
+    Compute an overall confidence score for a market signal.
+    
+    Factors:
+    - Weighted consensus (most important - 40%)
+    - Raw consensus (20%)
+    - Entry price tightness (20%)
+    - Not cooked / price hasn't moved (15%)
+    - Number of participants (5%)
+    """
+    # Weighted consensus contribution (0-40 points)
+    weighted_score = weighted_consensus * 40
+    
+    # Raw consensus contribution (0-20 points)
+    raw_score = consensus_percent * 20
+    
+    # Tight band contribution (0-20 points)
+    tight_score = 20 if tight_band else 0
+    
+    # Not cooked contribution (0-15 points)
+    cooked_score = 15 if not cooked else 0
+    
+    # Participants contribution (0-5 points, scaled logarithmically)
+    # More participants = more confidence, but diminishing returns
+    participant_score = min(5, np.log1p(participants) * 1.5)
+    
+    total = weighted_score + raw_score + tight_score + cooked_score + participant_score
+    # Normalize to 0-1 range
+    return total / 100.0
+
+
 async def compute_and_store(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -74,6 +148,9 @@ async def compute_and_store(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     wallet_set = {w.lower() for w in wallets}
     buy_rows = db.get_all_buy_trades(conn)
+    
+    # Get accuracy map for weighting
+    accuracy_map = db.get_wallet_accuracy_map(conn)
 
     latest_buy: dict[tuple[str, str], dict[str, Any]] = {}
     for r in buy_rows:
@@ -116,6 +193,11 @@ async def compute_and_store(
         total_participants = len(recs)
         participants = len(leading_recs)
         consensus_percent = (participants / total_participants) if total_participants else 0.0
+        
+        # Compute weighted consensus based on trader accuracy
+        weighted_consensus, weighted_participants = _compute_weighted_consensus(
+            recs, leading_outcome, accuracy_map
+        )
 
         prices = [p for p in (_safe_float(x.get("price")) for x in leading_recs) if p is not None]
         band_min = band_max = mean_entry = stddev = None
@@ -134,8 +216,10 @@ async def compute_and_store(
                 "title": title,
                 "leading_outcome": leading_outcome,
                 "consensus_percent": float(consensus_percent),
+                "weighted_consensus_percent": float(weighted_consensus),
                 "total_participants": int(total_participants),
                 "participants": int(participants),
+                "weighted_participants": float(weighted_participants),
                 "band_min": band_min,
                 "band_max": band_max,
                 "mean_entry": mean_entry,
@@ -145,6 +229,7 @@ async def compute_and_store(
                 "cooked": False,
                 "price_unavailable": True,
                 "ready": False,
+                "confidence_score": 0.0,
             }
         )
 
@@ -169,7 +254,18 @@ async def compute_and_store(
             r["price_unavailable"] = False
             r["cooked"] = abs(float(midpoint) - float(r["mean_entry"])) > 0.05
         r["ready"] = (
-            float(r["consensus_percent"]) >= 0.80 and bool(r["tight_band"]) and not bool(r["cooked"])
+            float(r["weighted_consensus_percent"]) >= 0.75 
+            and bool(r["tight_band"]) 
+            and not bool(r["cooked"])
+        )
+        
+        # Compute confidence score
+        r["confidence_score"] = _compute_confidence_score(
+            r["weighted_consensus_percent"],
+            r["consensus_percent"],
+            r["tight_band"],
+            r["cooked"],
+            r["participants"],
         )
 
     db.replace_market_state(conn, market_rows)

@@ -21,6 +21,9 @@ from .models import (
     StateResponse,
     TradeItem,
     WalletTrades,
+    WalletStats,
+    WalletStatsResponse,
+    WalletsListResponse,
 )
 
 
@@ -87,8 +90,10 @@ class RefreshManager:
                 title=r.get("title"),
                 leadingOutcome=r.get("leading_outcome"),
                 consensusPercent=float(r.get("consensus_percent") or 0.0),
+                weightedConsensusPercent=float(r.get("weighted_consensus_percent") or 0.0),
                 totalParticipants=int(r.get("total_participants") or 0),
                 participants=int(r.get("participants") or 0),
+                weightedParticipants=float(r.get("weighted_participants") or 0.0),
                 bandMin=r.get("band_min"),
                 bandMax=r.get("band_max"),
                 meanEntry=r.get("mean_entry"),
@@ -98,6 +103,7 @@ class RefreshManager:
                 cooked=bool(r.get("cooked")),
                 priceUnavailable=bool(r.get("price_unavailable")),
                 ready=bool(r.get("ready")),
+                confidenceScore=float(r.get("confidence_score") or 0.0),
                 updatedAt=r.get("updated_at"),
             )
             for r in markets_raw
@@ -363,4 +369,79 @@ async def market_detail(conditionId: str) -> MarketDetailResponse:
     wallets_out.sort(key=lambda x: x.wallet)
 
     return MarketDetailResponse(conditionId=conditionId, title=title, wallets=wallets_out)
+
+
+@app.get("/wallets", response_model=WalletsListResponse)
+async def list_wallets(
+    order_by: str = Query(default="recent_accuracy_7d"),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> WalletsListResponse:
+    """Get all wallets with their performance stats, ordered by specified field."""
+    with db.db_conn(settings.db_path) as conn:
+        wallet_stats_raw = db.get_all_wallet_stats(conn, order_by=order_by, limit=limit)
+        total_count = db.count_wallets(conn)
+
+    wallets = [
+        WalletStats(
+            wallet=w["wallet"],
+            rank=w.get("rank"),
+            userName=w.get("user_name"),
+            leaderboardPnl=w.get("leaderboard_pnl"),
+            totalTrades=w.get("total_trades", 0),
+            wonTrades=w.get("won_trades", 0),
+            lostTrades=w.get("lost_trades", 0),
+            pendingTrades=w.get("pending_trades", 0),
+            winRate=w.get("win_rate", 0.0),
+            totalPnl=w.get("total_pnl", 0.0),
+            avgRoi=w.get("avg_roi", 0.0),
+            recentTrades7d=w.get("recent_trades_7d", 0),
+            recentWon7d=w.get("recent_won_7d", 0),
+            recentAccuracy7d=w.get("recent_accuracy_7d", 0.0),
+            recentTrades30d=w.get("recent_trades_30d", 0),
+            recentWon30d=w.get("recent_won_30d", 0),
+            recentAccuracy30d=w.get("recent_accuracy_30d", 0.0),
+            streak=w.get("streak", 0),
+            lastTradeTimestamp=w.get("last_trade_timestamp"),
+            updatedAt=w.get("updated_at"),
+        )
+        for w in wallet_stats_raw
+    ]
+
+    return WalletsListResponse(wallets=wallets, totalCount=total_count)
+
+
+@app.get("/wallet/{address}", response_model=WalletStatsResponse)
+async def get_wallet(address: str) -> WalletStatsResponse:
+    """Get detailed stats and recent outcomes for a specific wallet."""
+    with db.db_conn(settings.db_path) as conn:
+        stats_raw = db.get_wallet_stats(conn, address)
+        outcomes_raw = db.get_wallet_outcomes(conn, address, limit=50)
+
+    stats = None
+    if stats_raw:
+        stats = WalletStats(
+            wallet=stats_raw["wallet"],
+            totalTrades=stats_raw.get("total_trades", 0),
+            wonTrades=stats_raw.get("won_trades", 0),
+            lostTrades=stats_raw.get("lost_trades", 0),
+            pendingTrades=stats_raw.get("pending_trades", 0),
+            winRate=stats_raw.get("win_rate", 0.0),
+            totalPnl=stats_raw.get("total_pnl", 0.0),
+            avgRoi=stats_raw.get("avg_roi", 0.0),
+            recentTrades7d=stats_raw.get("recent_trades_7d", 0),
+            recentWon7d=stats_raw.get("recent_won_7d", 0),
+            recentAccuracy7d=stats_raw.get("recent_accuracy_7d", 0.0),
+            recentTrades30d=stats_raw.get("recent_trades_30d", 0),
+            recentWon30d=stats_raw.get("recent_won_30d", 0),
+            recentAccuracy30d=stats_raw.get("recent_accuracy_30d", 0.0),
+            streak=stats_raw.get("streak", 0),
+            lastTradeTimestamp=stats_raw.get("last_trade_timestamp"),
+            updatedAt=stats_raw.get("updated_at"),
+        )
+
+    return WalletStatsResponse(
+        wallet=address.lower(),
+        stats=stats,
+        recentOutcomes=outcomes_raw,
+    )
 

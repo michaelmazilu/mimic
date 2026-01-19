@@ -1,4 +1,4 @@
-import type { MarketDetailResponse, RefreshResponse, StateResponse } from "@/app/lib/types";
+import type { MarketDetailResponse, RefreshResponse, StateResponse, WalletsListResponse } from "@/app/lib/types";
 
 export const DEFAULT_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
@@ -33,5 +33,16 @@ export async function getMarketDetail(
   return await fetchJson<MarketDetailResponse>(
     `${backendUrl}/market/${encodeURIComponent(conditionId)}`
   );
+}
+
+export async function getWallets(
+  backendUrl: string = DEFAULT_BACKEND_URL,
+  opts?: { orderBy?: string; limit?: number }
+): Promise<WalletsListResponse> {
+  const params = new URLSearchParams();
+  if (opts?.orderBy) params.set("order_by", opts.orderBy);
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return await fetchJson<WalletsListResponse>(`${backendUrl}/wallets${qs ? `?${qs}` : ""}`);
 }
 
