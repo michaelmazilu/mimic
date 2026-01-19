@@ -13,7 +13,10 @@ import type { RefreshResponse, StateResponse, WalletStats } from "@/app/lib/type
 function fmtTs(ts: number | null | undefined): string {
   if (!ts) return "—";
   try {
-    return new Date(ts * 1000).toLocaleString();
+    return new Date(ts * 1000).toLocaleTimeString([], { 
+      hour: "2-digit", 
+      minute: "2-digit" 
+    });
   } catch {
     return String(ts);
   }
@@ -59,7 +62,6 @@ export default function HomePage() {
     };
   }, [backendUrl, pollInterval]);
 
-  // Fetch wallet stats periodically
   useEffect(() => {
     let cancelled = false;
     async function fetchWallets() {
@@ -68,11 +70,11 @@ export default function HomePage() {
         if (cancelled) return;
         setWalletStats(resp.wallets);
       } catch {
-        // Silently fail - wallet stats are optional
+        // Silently fail
       }
     }
     fetchWallets();
-    const id = window.setInterval(fetchWallets, pollInterval * 5); // Less frequent than state
+    const id = window.setInterval(fetchWallets, pollInterval * 5);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -114,68 +116,91 @@ export default function HomePage() {
   const clusters = state?.clusters ?? [];
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      <div className="glass card">
-        <div className="title">Mimic — Polymarket copy-trading signal dashboard</div>
-        <div className="row" style={{ gap: 10 }}>
-          <span className="badge">
-            backend: <code>{backendUrl}</code>
-          </span>
-          <span className="badge">
-            last refresh: <span className="muted">{fmtTs(state?.lastRefreshTs ?? null)}</span>
-          </span>
-          <span className="badge">
-            wallets: <span className="muted">{state?.walletCount ?? 0}</span>
-          </span>
-          <span className="badge">
-            trades: <span className="muted">{state?.tradeCount ?? 0}</span>
-          </span>
-          <span className="badge">
-            backend interval: <span className="muted">{state?.refreshIntervalSec ?? "—"}s</span>
-          </span>
-          <span className="badge">
-            refresh status:{" "}
-            <span className={state?.refreshInProgress ? "warn" : "muted"}>
-              {state?.refreshInProgress ? "in progress" : "idle"}
-            </span>
+    <div className="container">
+      {/* Header */}
+      <div className="section">
+        <h1 style={{ 
+          fontSize: 32, 
+          fontWeight: 600, 
+          letterSpacing: "-0.03em",
+          margin: "0 0 8px" 
+        }}>
+          Mimic
+        </h1>
+        <p className="secondary" style={{ margin: 0, fontSize: 15 }}>
+          Polymarket copy-trading signals
+        </p>
+      </div>
+
+      {/* Status Bar */}
+      <div className="section" style={{ 
+        display: "flex", 
+        gap: 32, 
+        flexWrap: "wrap",
+        paddingBottom: 24,
+        borderBottom: "1px solid var(--border)"
+      }}>
+        <div className="stat">
+          Last refresh <span className="stat-value">{fmtTs(state?.lastRefreshTs)}</span>
+        </div>
+        <div className="stat">
+          Wallets <span className="stat-value">{state?.walletCount ?? 0}</span>
+        </div>
+        <div className="stat">
+          Trades <span className="stat-value">{state?.tradeCount ?? 0}</span>
+        </div>
+        <div className="stat">
+          Status{" "}
+          <span className="stat-value">
+            {state?.refreshInProgress ? "Refreshing..." : "Idle"}
           </span>
         </div>
-        {error ? (
-          <div style={{ marginTop: 12 }} className="bad">
-            <div style={{ fontWeight: 650 }}>State poll error</div>
-            <div className="muted" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>
-              {error}
-            </div>
-          </div>
-        ) : null}
-
-        {refresh?.status === "error" ? (
-          <div style={{ marginTop: 12 }} className="bad">
-            <div style={{ fontWeight: 650 }}>Refresh error</div>
-            <div className="muted" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>
-              {refresh.error}
-            </div>
-          </div>
-        ) : null}
       </div>
 
-      <div className="row">
-        <SettingsPanel
-          settings={settings}
-          onChange={(next) => setSettings(next)}
-          onRefreshNow={async () => {
-            const r = await refreshNow(backendUrl, { nWallets: settings.nWallets });
-            setRefresh(r);
-          }}
-          refreshInProgress={state?.refreshInProgress ?? false}
-        />
-        <ClustersPanel clusters={clusters} />
-      </div>
+      {/* Error Display */}
+      {error ? (
+        <div className="section" style={{ 
+          padding: 16, 
+          border: "1px solid var(--border)", 
+          borderRadius: 8 
+        }}>
+          <div style={{ fontWeight: 500, marginBottom: 4 }}>Connection Error</div>
+          <div className="secondary" style={{ fontSize: 13 }}>{error}</div>
+        </div>
+      ) : null}
 
+      {refresh?.status === "error" ? (
+        <div className="section" style={{ 
+          padding: 16, 
+          border: "1px solid var(--border)", 
+          borderRadius: 8 
+        }}>
+          <div style={{ fontWeight: 500, marginBottom: 4 }}>Refresh Error</div>
+          <div className="secondary" style={{ fontSize: 13 }}>{refresh.error}</div>
+        </div>
+      ) : null}
+
+      {/* Markets Table */}
       <MarketsTable markets={markets} />
 
+      {/* Settings and Clusters Row */}
+      <div className="section">
+        <div className="row">
+          <SettingsPanel
+            settings={settings}
+            onChange={(next) => setSettings(next)}
+            onRefreshNow={async () => {
+              const r = await refreshNow(backendUrl, { nWallets: settings.nWallets });
+              setRefresh(r);
+            }}
+            refreshInProgress={state?.refreshInProgress ?? false}
+          />
+          <ClustersPanel clusters={clusters} />
+        </div>
+      </div>
+
+      {/* Wallets Table */}
       <WalletsPanel wallets={walletStats} />
     </div>
   );
 }
-

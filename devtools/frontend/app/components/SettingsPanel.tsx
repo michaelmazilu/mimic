@@ -16,17 +16,13 @@ export function SettingsPanel({
   refreshInProgress: boolean;
 }) {
   return (
-    <div className="glass card" style={{ flex: "1 1 320px", minWidth: 280 }}>
-      <div className="title">Settings (local)</div>
-      <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-        Stored in <code>localStorage</code>. Backend enforces its own refresh interval.
-      </div>
+    <div className="card" style={{ flex: "1 1 320px", minWidth: 280 }}>
+      <div className="title">Settings</div>
+      <div className="subtitle">Local configuration</div>
 
-      <div className="row" style={{ gap: 12 }}>
-        <div style={{ flex: "1 1 160px" }}>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            N_WALLETS
-          </div>
+      <div style={{ display: "grid", gap: 16 }}>
+        <div>
+          <div className="label">Wallets to track</div>
           <input
             className="input"
             type="number"
@@ -36,10 +32,8 @@ export function SettingsPanel({
             onChange={(e) => onChange({ ...settings, nWallets: Number(e.target.value) })}
           />
         </div>
-        <div style={{ flex: "1 1 160px" }}>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            POLL_INTERVAL_MS
-          </div>
+        <div>
+          <div className="label">Poll interval (ms)</div>
           <input
             className="input"
             type="number"
@@ -49,10 +43,8 @@ export function SettingsPanel({
             onChange={(e) => onChange({ ...settings, pollIntervalMs: Number(e.target.value) })}
           />
         </div>
-        <div style={{ flex: "1 1 160px" }}>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            REFRESH_INTERVAL_MS
-          </div>
+        <div>
+          <div className="label">Refresh interval (ms)</div>
           <input
             className="input"
             type="number"
@@ -64,15 +56,11 @@ export function SettingsPanel({
         </div>
       </div>
 
-      <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ marginTop: 20 }}>
         <button className="btn" onClick={onRefreshNow} disabled={refreshInProgress}>
-          {refreshInProgress ? "Refreshing…" : "Refresh now"}
+          {refreshInProgress ? "Refreshing..." : "Refresh Now"}
         </button>
-        <span className="muted" style={{ fontSize: 12 }}>
-          Uses your <code>N_WALLETS</code> value.
-        </span>
       </div>
     </div>
   );
 }
-
