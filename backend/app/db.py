@@ -90,12 +90,16 @@ def init_db(db_path: str) -> None:
               price_unavailable INTEGER,
               ready INTEGER,
               confidence_score REAL,
+              end_date TEXT,
+              is_closed INTEGER DEFAULT 0,
+              is_active INTEGER DEFAULT 1,
               updated_at INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_market_state_consensus ON computed_market_state(consensus_percent DESC);
             CREATE INDEX IF NOT EXISTS idx_market_state_weighted ON computed_market_state(weighted_consensus_percent DESC);
             CREATE INDEX IF NOT EXISTS idx_market_state_confidence ON computed_market_state(confidence_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_state_active ON computed_market_state(is_active, is_closed);
 
             CREATE TABLE IF NOT EXISTS computed_clusters (
               cluster_id TEXT PRIMARY KEY,
@@ -367,9 +371,10 @@ def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
           condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
           total_participants, participants, weighted_participants,
           band_min, band_max, mean_entry, stddev, tight_band,
-          midpoint, cooked, price_unavailable, ready, confidence_score, updated_at
+          midpoint, cooked, price_unavailable, ready, confidence_score,
+          end_date, is_closed, is_active, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -391,6 +396,9 @@ def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
                 1 if r.get("price_unavailable") else 0,
                 1 if r.get("ready") else 0,
                 r.get("confidence_score", 0.0),
+                r.get("end_date"),
+                1 if r.get("is_closed") else 0,
+                1 if r.get("is_active", True) else 0,
                 now,
             )
             for r in rows
@@ -418,18 +426,34 @@ def replace_clusters(conn: sqlite3.Connection, clusters: list[dict[str, Any]]) -
     )
 
 
-def read_market_state(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT
-          condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
-          total_participants, participants, weighted_participants,
-          band_min, band_max, mean_entry, stddev, tight_band, midpoint, cooked, 
-          price_unavailable, ready, confidence_score, updated_at
-        FROM computed_market_state
-        ORDER BY confidence_score DESC, weighted_consensus_percent DESC, participants DESC
-        """
-    ).fetchall()
+def read_market_state(conn: sqlite3.Connection, *, active_only: bool = True) -> list[dict[str, Any]]:
+    """Read market state, optionally filtering to only active (non-closed) markets."""
+    if active_only:
+        rows = conn.execute(
+            """
+            SELECT
+              condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
+              total_participants, participants, weighted_participants,
+              band_min, band_max, mean_entry, stddev, tight_band, midpoint, cooked, 
+              price_unavailable, ready, confidence_score, end_date, is_closed, is_active, updated_at
+            FROM computed_market_state
+            WHERE is_closed = 0 AND is_active = 1
+            ORDER BY confidence_score DESC, weighted_consensus_percent DESC, participants DESC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT
+              condition_id, title, leading_outcome, consensus_percent, weighted_consensus_percent,
+              total_participants, participants, weighted_participants,
+              band_min, band_max, mean_entry, stddev, tight_band, midpoint, cooked, 
+              price_unavailable, ready, confidence_score, end_date, is_closed, is_active, updated_at
+            FROM computed_market_state
+            ORDER BY confidence_score DESC, weighted_consensus_percent DESC, participants DESC
+            """
+        ).fetchall()
+    
     out: list[dict[str, Any]] = []
     for r in rows:
         out.append(
@@ -452,6 +476,9 @@ def read_market_state(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "price_unavailable": bool(r["price_unavailable"]),
                 "ready": bool(r["ready"]),
                 "confidence_score": r["confidence_score"] or 0.0,
+                "end_date": r["end_date"],
+                "is_closed": bool(r["is_closed"]),
+                "is_active": bool(r["is_active"]),
                 "updated_at": r["updated_at"],
             }
         )

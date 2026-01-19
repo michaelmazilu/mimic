@@ -17,6 +17,9 @@ export type MarketSummary = {
   priceUnavailable: boolean;
   ready: boolean;
   confidenceScore: number;
+  endDate?: string | null;
+  isClosed: boolean;
+  isActive: boolean;
   updatedAt?: number | null;
 };
 

@@ -104,6 +104,9 @@ class RefreshManager:
                 priceUnavailable=bool(r.get("price_unavailable")),
                 ready=bool(r.get("ready")),
                 confidenceScore=float(r.get("confidence_score") or 0.0),
+                endDate=r.get("end_date"),
+                isClosed=bool(r.get("is_closed")),
+                isActive=bool(r.get("is_active", True)),
                 updatedAt=r.get("updated_at"),
             )
             for r in markets_raw

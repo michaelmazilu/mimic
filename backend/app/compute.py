@@ -9,7 +9,7 @@ import sqlite3
 
 from . import clustering, db
 from .config import Settings
-from .ingest import fetch_orderbook
+from .ingest import fetch_orderbook, fetch_active_markets
 
 
 def _safe_float(x: Any) -> float | None:
@@ -230,8 +230,37 @@ async def compute_and_store(
                 "price_unavailable": True,
                 "ready": False,
                 "confidence_score": 0.0,
+                "end_date": None,
+                "is_closed": False,
+                "is_active": True,
             }
         )
+
+    # Fetch active markets metadata to filter out closed/expired markets
+    active_markets = await fetch_active_markets(settings, client=client, sem=sem, limit=1000)
+    active_condition_ids = {m.get("conditionId") for m in active_markets if m.get("conditionId")}
+    market_metadata = {
+        m.get("conditionId"): {
+            "end_date": m.get("endDate"),
+            "is_closed": m.get("closed", False),
+            "is_active": m.get("active", True),
+        }
+        for m in active_markets
+        if m.get("conditionId")
+    }
+    
+    # Update market rows with metadata
+    for r in market_rows:
+        cid = r["condition_id"]
+        if cid in market_metadata:
+            meta = market_metadata[cid]
+            r["end_date"] = meta.get("end_date")
+            r["is_closed"] = meta.get("is_closed", False)
+            r["is_active"] = meta.get("is_active", True)
+        else:
+            # Market not in active list - mark as closed/inactive
+            r["is_closed"] = True
+            r["is_active"] = False
 
     # Pricing in parallel, bounded by sem; dedupe by asset_id.
     asset_to_midpoint: dict[str, float | None] = {}

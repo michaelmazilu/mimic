@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 
 import type { WalletStats } from "@/app/lib/types";
 
@@ -9,7 +9,11 @@ function fmtPct(x: number): string {
   return `${(x * 100).toFixed(0)}%`;
 }
 
+const PAGE_SIZE = 10;
+
 export function WalletsPanel({ wallets }: { wallets: WalletStats[] }) {
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
   if (!wallets.length) {
     return (
       <div className="section">
@@ -20,10 +24,19 @@ export function WalletsPanel({ wallets }: { wallets: WalletStats[] }) {
     );
   }
 
+  const visibleWallets = wallets.slice(0, visibleCount);
+  const hasMore = visibleCount < wallets.length;
+
+  const handleLoadMore = () => {
+    setVisibleCount((prev) => Math.min(prev + PAGE_SIZE, wallets.length));
+  };
+
   return (
     <div className="section">
       <div className="title">Top Traders</div>
-      <div className="subtitle">Ranked by 7-day accuracy</div>
+      <div className="subtitle">
+        Ranked by 7-day accuracy ({wallets.length} total)
+      </div>
       <div className="tableWrap">
         <table>
           <thead>
@@ -37,7 +50,7 @@ export function WalletsPanel({ wallets }: { wallets: WalletStats[] }) {
             </tr>
           </thead>
           <tbody>
-            {wallets.slice(0, 15).map((w, idx) => (
+            {visibleWallets.map((w, idx) => (
               <tr key={w.wallet}>
                 <td className="secondary">{w.rank ?? idx + 1}</td>
                 <td>
@@ -79,6 +92,13 @@ export function WalletsPanel({ wallets }: { wallets: WalletStats[] }) {
           </tbody>
         </table>
       </div>
+      {hasMore && (
+        <div style={{ marginTop: 16, textAlign: "center" }}>
+          <button className="btn" onClick={handleLoadMore}>
+            Load More ({wallets.length - visibleCount} remaining)
+          </button>
+        </div>
+      )}
     </div>
   );
 }

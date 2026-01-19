@@ -45,6 +45,9 @@ class MarketSummary(BaseModel):
     priceUnavailable: bool = True
     ready: bool = False
     confidenceScore: float = 0.0  # Combined score factoring in weighted consensus + tightness
+    endDate: str | None = None
+    isClosed: bool = False
+    isActive: bool = True
     updatedAt: int | None = None
 
 

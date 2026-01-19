@@ -105,3 +105,72 @@ async def fetch_orderbook(
     except Exception:
         return None
 
+
+async def fetch_market_metadata(
+    condition_ids: list[str],
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+) -> dict[str, dict[str, Any]]:
+    """
+    Fetch market metadata (endDate, closed status) from Gamma API.
+    Returns a dict mapping conditionId -> metadata.
+    """
+    gamma_base = "https://gamma-api.polymarket.com"
+    result: dict[str, dict[str, Any]] = {}
+    
+    # Fetch in batches to avoid overwhelming the API
+    batch_size = 50
+    for i in range(0, len(condition_ids), batch_size):
+        batch = condition_ids[i:i + batch_size]
+        
+        # Fetch all active markets and filter
+        try:
+            data = await _get_json(
+                client,
+                f"{gamma_base}/markets",
+                sem=sem,
+                params={"limit": 500, "closed": "false"},
+                headers={"User-Agent": settings.user_agent},
+            )
+            if isinstance(data, list):
+                for m in data:
+                    cid = m.get("conditionId")
+                    if cid:
+                        result[cid] = {
+                            "end_date": m.get("endDate"),
+                            "closed": m.get("closed", False),
+                            "active": m.get("active", True),
+                            "question": m.get("question"),
+                            "resolved": m.get("closed", False),
+                        }
+        except Exception:
+            pass  # Continue without metadata if API fails
+    
+    return result
+
+
+async def fetch_active_markets(
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Fetch list of currently active (not closed) markets."""
+    gamma_base = "https://gamma-api.polymarket.com"
+    try:
+        data = await _get_json(
+            client,
+            f"{gamma_base}/markets",
+            sem=sem,
+            params={"limit": limit, "closed": "false", "active": "true"},
+            headers={"User-Agent": settings.user_agent},
+        )
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
