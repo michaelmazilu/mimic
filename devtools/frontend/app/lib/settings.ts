@@ -5,7 +5,7 @@ export type ClientSettings = {
 };
 
 export const DEFAULT_SETTINGS: ClientSettings = {
-  nWallets: 50,
+  nWallets: 500,
   pollIntervalMs: 2000,
   refreshIntervalMs: 60000
 };
@@ -28,7 +28,7 @@ export function loadSettings(): ClientSettings {
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return DEFAULT_SETTINGS;
-    const nWallets = clampInt(Number(parsed.nWallets), 1, 200);
+    const nWallets = clampInt(Number(parsed.nWallets), 1, 500);
     const pollIntervalMs = clampInt(Number(parsed.pollIntervalMs), 250, 60000);
     const refreshIntervalMs = clampInt(Number(parsed.refreshIntervalMs), 1000, 10 * 60 * 1000);
     return { nWallets, pollIntervalMs, refreshIntervalMs };

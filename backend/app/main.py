@@ -151,7 +151,7 @@ class RefreshManager:
                 effective_n_wallets = _clamp_int(
                     n_wallets if n_wallets is not None else self.settings.n_wallets,
                     lo=1,
-                    hi=200,
+                    hi=500,
                 )
                 effective_trades_limit = _clamp_int(
                     trades_limit if trades_limit is not None else self.settings.trades_limit,
@@ -166,9 +166,14 @@ class RefreshManager:
                 wallet_upserts = 0
                 trade_inserts = 0
 
-                timeout = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+                timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    leaderboard = await ingest.fetch_leaderboard(self.settings, client=client, sem=sem)
+                    leaderboard = await ingest.fetch_leaderboard(
+                        self.settings,
+                        client=client,
+                        sem=sem,
+                        target_count=effective_n_wallets,
+                    )
                     leaderboard_top = leaderboard[:effective_n_wallets]
                     wallets = []
                     for entry in leaderboard_top:
@@ -303,8 +308,8 @@ async def health() -> HealthResponse:
 
 @app.get("/refresh", response_model=RefreshResponse)
 async def refresh(
-    n_wallets: int | None = Query(default=None, ge=1, le=200),
-    trades_limit: int | None = Query(default=None, ge=1, le=200),
+    n_wallets: int | None = Query(default=None, ge=1, le=500),
+    trades_limit: int | None = Query(default=None, ge=1, le=500),
 ) -> RefreshResponse:
     return await refresh_manager.refresh_if_due(n_wallets=n_wallets, trades_limit=trades_limit)
 
@@ -374,7 +379,7 @@ async def market_detail(conditionId: str) -> MarketDetailResponse:
 @app.get("/wallets", response_model=WalletsListResponse)
 async def list_wallets(
     order_by: str = Query(default="recent_accuracy_7d"),
-    limit: int = Query(default=100, ge=1, le=200),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> WalletsListResponse:
     """Get all wallets with their performance stats, ordered by specified field."""
     with db.db_conn(settings.db_path) as conn:

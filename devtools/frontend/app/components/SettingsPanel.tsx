@@ -27,7 +27,7 @@ export function SettingsPanel({
             className="input"
             type="number"
             min={1}
-            max={200}
+            max={500}
             value={settings.nWallets}
             onChange={(e) => onChange({ ...settings, nWallets: Number(e.target.value) })}
           />

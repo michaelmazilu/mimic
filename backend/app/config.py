@@ -43,10 +43,10 @@ def get_settings() -> Settings:
     default_db_path = str(backend_root / "mimic.sqlite3")
     return Settings(
         db_path=os.getenv("MIMIC_DB_PATH", default_db_path),
-        n_wallets=_env_int("MIMIC_N_WALLETS", 50),
-        trades_limit=_env_int("MIMIC_TRADES_LIMIT", 100),
-        refresh_interval_sec=_env_int("MIMIC_REFRESH_INTERVAL_SEC", 60),
-        outbound_concurrency=_env_int("MIMIC_OUTBOUND_CONCURRENCY", 5),
+        n_wallets=_env_int("MIMIC_N_WALLETS", 100),
+        trades_limit=_env_int("MIMIC_TRADES_LIMIT", 150),
+        refresh_interval_sec=_env_int("MIMIC_REFRESH_INTERVAL_SEC", 120),
+        outbound_concurrency=_env_int("MIMIC_OUTBOUND_CONCURRENCY", 15),
         enable_pricing=_env_bool("MIMIC_ENABLE_PRICING", True),
     )
 

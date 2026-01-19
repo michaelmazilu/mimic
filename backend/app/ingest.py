@@ -26,17 +26,42 @@ async def _get_json(
     return resp.json()
 
 
-async def fetch_leaderboard(settings: Settings, *, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> list[dict]:
+async def fetch_leaderboard(
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    target_count: int = 500,
+) -> list[dict]:
+    """Fetch leaderboard with pagination to get up to target_count entries."""
     url = f"{settings.data_api_base}/v1/leaderboard"
-    data = await _get_json(
-        client,
-        url,
-        sem=sem,
-        headers={"User-Agent": settings.user_agent},
-    )
-    if not isinstance(data, list):
-        raise IngestError("Unexpected leaderboard response shape")
-    return data
+    all_entries: list[dict] = []
+    page_size = 50  # API max per request
+    offset = 0
+    
+    while len(all_entries) < target_count:
+        data = await _get_json(
+            client,
+            url,
+            sem=sem,
+            params={"limit": page_size, "offset": offset},
+            headers={"User-Agent": settings.user_agent},
+        )
+        if not isinstance(data, list):
+            raise IngestError("Unexpected leaderboard response shape")
+        
+        if not data:
+            # No more entries
+            break
+            
+        all_entries.extend(data)
+        offset += page_size
+        
+        # If we got fewer than page_size, we've reached the end
+        if len(data) < page_size:
+            break
+    
+    return all_entries[:target_count]
 
 
 async def fetch_trades_for_wallet(
