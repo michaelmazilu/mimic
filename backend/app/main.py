@@ -10,9 +10,12 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import compute, db, ingest
+from . import backtest, compute, db, ingest
 from .config import Settings, get_settings
 from .models import (
+    BacktestConfigModel,
+    BacktestRunResponse,
+    BacktestTradeModel,
     ClusterSummary,
     HealthResponse,
     MarketDetailResponse,
@@ -278,7 +281,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -451,5 +454,205 @@ async def get_wallet(address: str) -> WalletStatsResponse:
         wallet=address.lower(),
         stats=stats,
         recentOutcomes=outcomes_raw,
+    )
+
+
+# ============================================================================
+# Backtest Endpoints
+# ============================================================================
+
+
+@app.post("/backtest", response_model=BacktestRunResponse)
+async def run_backtest_endpoint(
+    config: BacktestConfigModel | None = None,
+) -> BacktestRunResponse:
+    """
+    Run a backtest with the specified configuration.
+    If no config provided, uses defaults (80% confidence, scaled betting, 180 days).
+    """
+    # Build config from request or use defaults
+    bt_config = backtest.BacktestConfig(
+        min_confidence=config.minConfidence if config else 0.80,
+        bet_sizing=config.betSizing if config else "scaled",
+        base_bet=config.baseBet if config else 100.0,
+        max_bet=config.maxBet if config else 500.0,
+        lookback_days=config.lookbackDays if config else 180,
+        min_participants=config.minParticipants if config else 2,
+    )
+    
+    sem = asyncio.Semaphore(settings.outbound_concurrency)
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+    
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        # Use a separate connection with longer timeout to avoid locking issues
+        conn = db.connect(settings.db_path, timeout=60.0)
+        try:
+            result = await backtest.run_backtest(
+                conn,
+                settings,
+                bt_config,
+                client=client,
+                sem=sem,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    
+    return BacktestRunResponse(
+        runId=result.run_id,
+        status="completed",
+        config=BacktestConfigModel(
+            minConfidence=bt_config.min_confidence,
+            betSizing=bt_config.bet_sizing,
+            baseBet=bt_config.base_bet,
+            maxBet=bt_config.max_bet,
+            lookbackDays=bt_config.lookback_days,
+            minParticipants=bt_config.min_participants,
+        ),
+        totalTrades=result.total_trades,
+        winningTrades=result.winning_trades,
+        losingTrades=result.losing_trades,
+        pendingTrades=result.pending_trades,
+        winRate=result.win_rate,
+        totalPnl=result.total_pnl,
+        totalInvested=result.total_invested,
+        roi=result.roi,
+        maxDrawdown=result.max_drawdown,
+        sharpeRatio=result.sharpe_ratio,
+        profitFactor=result.profit_factor,
+        trades=[
+            BacktestTradeModel(
+                conditionId=t.condition_id,
+                title=t.title,
+                signalTimestamp=t.signal_timestamp,
+                predictedOutcome=t.predicted_outcome,
+                confidenceScore=t.confidence_score,
+                betSize=t.bet_size,
+                entryPrice=t.entry_price,
+                actualOutcome=t.actual_outcome,
+                pnl=t.pnl,
+                won=t.won,
+            )
+            for t in result.trades
+        ],
+        equityCurve=result.equity_curve,
+    )
+
+
+@app.get("/backtest/{run_id}", response_model=BacktestRunResponse)
+async def get_backtest_run(run_id: str) -> BacktestRunResponse:
+    """Get results for a specific backtest run."""
+    with db.db_conn(settings.db_path) as conn:
+        run = db.get_backtest_run(conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Backtest run not found")
+        
+        trades = db.get_backtest_trades(conn, run_id, limit=500)
+    
+    config_dict = run.get("config", {})
+    
+    return BacktestRunResponse(
+        runId=run["run_id"],
+        status=run.get("status", "unknown"),
+        config=BacktestConfigModel(
+            minConfidence=config_dict.get("min_confidence", 0.80),
+            betSizing=config_dict.get("bet_sizing", "scaled"),
+            baseBet=config_dict.get("base_bet", 100.0),
+            maxBet=config_dict.get("max_bet", 500.0),
+            lookbackDays=config_dict.get("lookback_days", 180),
+            minParticipants=config_dict.get("min_participants", 2),
+        ),
+        totalTrades=run.get("total_trades", 0),
+        winningTrades=run.get("winning_trades", 0),
+        losingTrades=run.get("losing_trades", 0),
+        pendingTrades=run.get("total_trades", 0) - run.get("winning_trades", 0) - run.get("losing_trades", 0),
+        winRate=run.get("win_rate", 0.0),
+        totalPnl=run.get("total_pnl", 0.0),
+        totalInvested=run.get("total_invested", 0.0),
+        roi=run.get("roi", 0.0),
+        maxDrawdown=run.get("max_drawdown", 0.0),
+        sharpeRatio=run.get("sharpe_ratio", 0.0),
+        profitFactor=0.0,  # Not stored in DB
+        trades=[
+            BacktestTradeModel(
+                conditionId=t["condition_id"],
+                title=t.get("title"),
+                signalTimestamp=t["signal_timestamp"],
+                predictedOutcome=t["predicted_outcome"],
+                confidenceScore=t["confidence_score"],
+                betSize=t["bet_size"],
+                entryPrice=t.get("entry_price"),
+                actualOutcome=t.get("actual_outcome"),
+                pnl=t.get("pnl"),
+                won=t.get("won"),
+            )
+            for t in trades
+        ],
+        equityCurve=[],  # Would need to rebuild from trades
+    )
+
+
+@app.get("/backtest/latest", response_model=BacktestRunResponse | None)
+async def get_latest_backtest() -> BacktestRunResponse | None:
+    """Get the most recent completed backtest run."""
+    with db.db_conn(settings.db_path) as conn:
+        run = db.get_latest_backtest_run(conn)
+        if not run:
+            return None
+        
+        trades = db.get_backtest_trades(conn, run["run_id"], limit=500)
+    
+    config_dict = run.get("config", {})
+    
+    # Build equity curve from trades
+    equity_curve = []
+    equity = 0.0
+    for t in sorted(trades, key=lambda x: x["signal_timestamp"]):
+        if t.get("won") is not None:
+            equity += t.get("pnl") or 0
+            equity_curve.append({
+                "timestamp": t["signal_timestamp"],
+                "equity": equity,
+                "pnl": t.get("pnl") or 0,
+            })
+    
+    return BacktestRunResponse(
+        runId=run["run_id"],
+        status=run.get("status", "unknown"),
+        config=BacktestConfigModel(
+            minConfidence=config_dict.get("min_confidence", 0.80),
+            betSizing=config_dict.get("bet_sizing", "scaled"),
+            baseBet=config_dict.get("base_bet", 100.0),
+            maxBet=config_dict.get("max_bet", 500.0),
+            lookbackDays=config_dict.get("lookback_days", 180),
+            minParticipants=config_dict.get("min_participants", 2),
+        ),
+        totalTrades=run.get("total_trades", 0),
+        winningTrades=run.get("winning_trades", 0),
+        losingTrades=run.get("losing_trades", 0),
+        pendingTrades=run.get("total_trades", 0) - run.get("winning_trades", 0) - run.get("losing_trades", 0),
+        winRate=run.get("win_rate", 0.0),
+        totalPnl=run.get("total_pnl", 0.0),
+        totalInvested=run.get("total_invested", 0.0),
+        roi=run.get("roi", 0.0),
+        maxDrawdown=run.get("max_drawdown", 0.0),
+        sharpeRatio=run.get("sharpe_ratio", 0.0),
+        profitFactor=0.0,
+        trades=[
+            BacktestTradeModel(
+                conditionId=t["condition_id"],
+                title=t.get("title"),
+                signalTimestamp=t["signal_timestamp"],
+                predictedOutcome=t["predicted_outcome"],
+                confidenceScore=t["confidence_score"],
+                betSize=t["bet_size"],
+                entryPrice=t.get("entry_price"),
+                actualOutcome=t.get("actual_outcome"),
+                pnl=t.get("pnl"),
+                won=t.get("won"),
+            )
+            for t in trades
+        ],
+        equityCurve=equity_curve,
     )
 

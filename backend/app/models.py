@@ -126,3 +126,52 @@ class WalletsListResponse(BaseModel):
     wallets: list[WalletStats] = Field(default_factory=list)
     totalCount: int = 0
 
+
+# ============================================================================
+# Backtest Models
+# ============================================================================
+
+
+class BacktestConfigModel(BaseModel):
+    """Configuration for a backtest run."""
+    minConfidence: float = 0.80
+    betSizing: str = "scaled"  # flat, kelly, scaled
+    baseBet: float = 100.0
+    maxBet: float = 500.0
+    lookbackDays: int = 180
+    minParticipants: int = 2
+
+
+class BacktestTradeModel(BaseModel):
+    """A single simulated trade in the backtest."""
+    conditionId: str
+    title: str | None = None
+    signalTimestamp: int
+    predictedOutcome: str
+    confidenceScore: float
+    betSize: float
+    entryPrice: float | None = None
+    actualOutcome: str | None = None
+    pnl: float | None = None
+    won: bool | None = None
+
+
+class BacktestRunResponse(BaseModel):
+    """Response for a backtest run."""
+    runId: str
+    status: str
+    config: BacktestConfigModel
+    totalTrades: int = 0
+    winningTrades: int = 0
+    losingTrades: int = 0
+    pendingTrades: int = 0
+    winRate: float = 0.0
+    totalPnl: float = 0.0
+    totalInvested: float = 0.0
+    roi: float = 0.0
+    maxDrawdown: float = 0.0
+    sharpeRatio: float = 0.0
+    profitFactor: float = 0.0
+    trades: list[BacktestTradeModel] = Field(default_factory=list)
+    equityCurve: list[dict[str, Any]] = Field(default_factory=list)
+

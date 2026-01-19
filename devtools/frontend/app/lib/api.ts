@@ -1,9 +1,23 @@
-import type { MarketDetailResponse, RefreshResponse, StateResponse, WalletsListResponse } from "@/app/lib/types";
+import type { BacktestConfig, BacktestRunResponse, MarketDetailResponse, RefreshResponse, StateResponse, WalletsListResponse } from "@/app/lib/types";
 
 export const DEFAULT_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, { cache: "no-store", ...options });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
@@ -44,5 +58,41 @@ export async function getWallets(
   if (opts?.limit != null) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return await fetchJson<WalletsListResponse>(`${backendUrl}/wallets${qs ? `?${qs}` : ""}`);
+}
+
+// Backtest API
+
+export async function runBacktest(
+  backendUrl: string = DEFAULT_BACKEND_URL,
+  config?: Partial<BacktestConfig>
+): Promise<BacktestRunResponse> {
+  const body = config ? {
+    minConfidence: config.minConfidence ?? 0.80,
+    betSizing: config.betSizing ?? "scaled",
+    baseBet: config.baseBet ?? 100.0,
+    maxBet: config.maxBet ?? 500.0,
+    lookbackDays: config.lookbackDays ?? 180,
+    minParticipants: config.minParticipants ?? 2,
+  } : null;
+  return await postJson<BacktestRunResponse>(`${backendUrl}/backtest`, body);
+}
+
+export async function getBacktestRun(
+  runId: string,
+  backendUrl: string = DEFAULT_BACKEND_URL
+): Promise<BacktestRunResponse> {
+  return await fetchJson<BacktestRunResponse>(`${backendUrl}/backtest/${encodeURIComponent(runId)}`);
+}
+
+export async function getLatestBacktest(
+  backendUrl: string = DEFAULT_BACKEND_URL
+): Promise<BacktestRunResponse | null> {
+  try {
+    const result = await fetchJson<BacktestRunResponse | null>(`${backendUrl}/backtest/latest`);
+    return result;
+  } catch (e) {
+    // Return null if no backtest exists
+    return null;
+  }
 }
 

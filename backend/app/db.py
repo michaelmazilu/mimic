@@ -12,12 +12,13 @@ def _utc_ts() -> int:
     return int(time.time())
 
 
-def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+def connect(db_path: str, *, timeout: float = 30.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")  # 30 second timeout for locks
     return conn
 
 
@@ -159,6 +160,56 @@ def init_db(db_path: str) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_wallet_stats_win_rate ON wallet_stats(win_rate DESC);
             CREATE INDEX IF NOT EXISTS idx_wallet_stats_recent_accuracy ON wallet_stats(recent_accuracy_7d DESC);
+
+            -- Store resolved market outcomes from CLOB API
+            CREATE TABLE IF NOT EXISTS market_resolutions (
+              condition_id TEXT PRIMARY KEY,
+              winning_outcome TEXT NOT NULL,
+              resolved_at INTEGER NOT NULL,
+              fetched_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_market_resolutions_resolved ON market_resolutions(resolved_at DESC);
+
+            -- Store backtest runs and results
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              run_id TEXT UNIQUE NOT NULL,
+              config_json TEXT NOT NULL,
+              started_at INTEGER NOT NULL,
+              completed_at INTEGER,
+              status TEXT DEFAULT 'running',
+              total_trades INTEGER DEFAULT 0,
+              winning_trades INTEGER DEFAULT 0,
+              losing_trades INTEGER DEFAULT 0,
+              win_rate REAL DEFAULT 0.0,
+              total_pnl REAL DEFAULT 0.0,
+              total_invested REAL DEFAULT 0.0,
+              roi REAL DEFAULT 0.0,
+              max_drawdown REAL DEFAULT 0.0,
+              sharpe_ratio REAL DEFAULT 0.0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS backtest_trades (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              run_id TEXT NOT NULL,
+              condition_id TEXT NOT NULL,
+              title TEXT,
+              signal_timestamp INTEGER NOT NULL,
+              predicted_outcome TEXT NOT NULL,
+              confidence_score REAL NOT NULL,
+              bet_size REAL NOT NULL,
+              entry_price REAL,
+              actual_outcome TEXT,
+              pnl REAL,
+              won INTEGER,
+              FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
+            CREATE INDEX IF NOT EXISTS idx_backtest_trades_timestamp ON backtest_trades(signal_timestamp DESC);
             """
         )
 
@@ -945,4 +996,385 @@ def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
         r["wallet"]: r["recent_accuracy_7d"]
         for r in rows
     }
+
+
+# ============================================================================
+# Market Resolutions Functions
+# ============================================================================
+
+
+def upsert_market_resolution(
+    conn: sqlite3.Connection,
+    condition_id: str,
+    winning_outcome: str,
+    resolved_at: int,
+) -> None:
+    """Insert or update a market resolution."""
+    now = _utc_ts()
+    conn.execute(
+        """
+        INSERT INTO market_resolutions(condition_id, winning_outcome, resolved_at, fetched_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(condition_id) DO UPDATE SET
+            winning_outcome = excluded.winning_outcome,
+            resolved_at = excluded.resolved_at,
+            fetched_at = excluded.fetched_at
+        """,
+        (condition_id, winning_outcome, resolved_at, now),
+    )
+
+
+def get_market_resolution(conn: sqlite3.Connection, condition_id: str) -> dict[str, Any] | None:
+    """Get resolution for a specific market."""
+    row = conn.execute(
+        "SELECT condition_id, winning_outcome, resolved_at, fetched_at FROM market_resolutions WHERE condition_id = ?",
+        (condition_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "condition_id": row["condition_id"],
+        "winning_outcome": row["winning_outcome"],
+        "resolved_at": row["resolved_at"],
+        "fetched_at": row["fetched_at"],
+    }
+
+
+def get_all_resolutions(conn: sqlite3.Connection) -> dict[str, str]:
+    """Get all market resolutions as condition_id -> winning_outcome mapping."""
+    rows = conn.execute("SELECT condition_id, winning_outcome FROM market_resolutions").fetchall()
+    return {r["condition_id"]: r["winning_outcome"] for r in rows}
+
+
+def bulk_upsert_resolutions(conn: sqlite3.Connection, resolutions: list[dict[str, Any]]) -> int:
+    """Bulk insert/update market resolutions."""
+    now = _utc_ts()
+    rows = [
+        (
+            r["condition_id"],
+            r["winning_outcome"],
+            r.get("resolved_at", now),
+            now,
+        )
+        for r in resolutions
+    ]
+    conn.executemany(
+        """
+        INSERT INTO market_resolutions(condition_id, winning_outcome, resolved_at, fetched_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(condition_id) DO UPDATE SET
+            winning_outcome = excluded.winning_outcome,
+            resolved_at = excluded.resolved_at,
+            fetched_at = excluded.fetched_at
+        """,
+        rows,
+    )
+    return len(rows)
+
+
+# ============================================================================
+# Backtest Functions
+# ============================================================================
+
+
+def create_backtest_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    config: dict[str, Any],
+) -> None:
+    """Create a new backtest run record."""
+    now = _utc_ts()
+    conn.execute(
+        """
+        INSERT INTO backtest_runs(run_id, config_json, started_at, status)
+        VALUES (?, ?, ?, 'running')
+        """,
+        (run_id, json.dumps(config), now),
+    )
+
+
+def update_backtest_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: str | None = None,
+    total_trades: int | None = None,
+    winning_trades: int | None = None,
+    losing_trades: int | None = None,
+    win_rate: float | None = None,
+    total_pnl: float | None = None,
+    total_invested: float | None = None,
+    roi: float | None = None,
+    max_drawdown: float | None = None,
+    sharpe_ratio: float | None = None,
+) -> None:
+    """Update backtest run with results."""
+    now = _utc_ts()
+    updates = ["completed_at = ?"]
+    values: list[Any] = [now]
+    
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+    if total_trades is not None:
+        updates.append("total_trades = ?")
+        values.append(total_trades)
+    if winning_trades is not None:
+        updates.append("winning_trades = ?")
+        values.append(winning_trades)
+    if losing_trades is not None:
+        updates.append("losing_trades = ?")
+        values.append(losing_trades)
+    if win_rate is not None:
+        updates.append("win_rate = ?")
+        values.append(win_rate)
+    if total_pnl is not None:
+        updates.append("total_pnl = ?")
+        values.append(total_pnl)
+    if total_invested is not None:
+        updates.append("total_invested = ?")
+        values.append(total_invested)
+    if roi is not None:
+        updates.append("roi = ?")
+        values.append(roi)
+    if max_drawdown is not None:
+        updates.append("max_drawdown = ?")
+        values.append(max_drawdown)
+    if sharpe_ratio is not None:
+        updates.append("sharpe_ratio = ?")
+        values.append(sharpe_ratio)
+    
+    values.append(run_id)
+    conn.execute(
+        f"UPDATE backtest_runs SET {', '.join(updates)} WHERE run_id = ?",
+        values,
+    )
+
+
+def insert_backtest_trade(
+    conn: sqlite3.Connection,
+    run_id: str,
+    condition_id: str,
+    title: str | None,
+    signal_timestamp: int,
+    predicted_outcome: str,
+    confidence_score: float,
+    bet_size: float,
+    entry_price: float | None,
+    actual_outcome: str | None,
+    pnl: float | None,
+    won: bool | None,
+) -> None:
+    """Insert a backtest trade record."""
+    conn.execute(
+        """
+        INSERT INTO backtest_trades(
+            run_id, condition_id, title, signal_timestamp, predicted_outcome,
+            confidence_score, bet_size, entry_price, actual_outcome, pnl, won
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            condition_id,
+            title,
+            signal_timestamp,
+            predicted_outcome,
+            confidence_score,
+            bet_size,
+            entry_price,
+            actual_outcome,
+            pnl,
+            1 if won else 0 if won is not None else None,
+        ),
+    )
+
+
+def bulk_insert_backtest_trades(conn: sqlite3.Connection, trades: list[dict[str, Any]]) -> int:
+    """Bulk insert backtest trades."""
+    rows = [
+        (
+            t["run_id"],
+            t["condition_id"],
+            t.get("title"),
+            t["signal_timestamp"],
+            t["predicted_outcome"],
+            t["confidence_score"],
+            t["bet_size"],
+            t.get("entry_price"),
+            t.get("actual_outcome"),
+            t.get("pnl"),
+            1 if t.get("won") else 0 if t.get("won") is not None else None,
+        )
+        for t in trades
+    ]
+    conn.executemany(
+        """
+        INSERT INTO backtest_trades(
+            run_id, condition_id, title, signal_timestamp, predicted_outcome,
+            confidence_score, bet_size, entry_price, actual_outcome, pnl, won
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    return len(rows)
+
+
+def get_backtest_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    """Get a backtest run by ID."""
+    row = conn.execute(
+        """
+        SELECT run_id, config_json, started_at, completed_at, status,
+               total_trades, winning_trades, losing_trades, win_rate,
+               total_pnl, total_invested, roi, max_drawdown, sharpe_ratio
+        FROM backtest_runs
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": row["run_id"],
+        "config": json.loads(row["config_json"]),
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "status": row["status"],
+        "total_trades": row["total_trades"],
+        "winning_trades": row["winning_trades"],
+        "losing_trades": row["losing_trades"],
+        "win_rate": row["win_rate"],
+        "total_pnl": row["total_pnl"],
+        "total_invested": row["total_invested"],
+        "roi": row["roi"],
+        "max_drawdown": row["max_drawdown"],
+        "sharpe_ratio": row["sharpe_ratio"],
+    }
+
+
+def get_latest_backtest_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Get the most recent completed backtest run."""
+    row = conn.execute(
+        """
+        SELECT run_id, config_json, started_at, completed_at, status,
+               total_trades, winning_trades, losing_trades, win_rate,
+               total_pnl, total_invested, roi, max_drawdown, sharpe_ratio
+        FROM backtest_runs
+        WHERE status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": row["run_id"],
+        "config": json.loads(row["config_json"]),
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "status": row["status"],
+        "total_trades": row["total_trades"],
+        "winning_trades": row["winning_trades"],
+        "losing_trades": row["losing_trades"],
+        "win_rate": row["win_rate"],
+        "total_pnl": row["total_pnl"],
+        "total_invested": row["total_invested"],
+        "roi": row["roi"],
+        "max_drawdown": row["max_drawdown"],
+        "sharpe_ratio": row["sharpe_ratio"],
+    }
+
+
+def get_backtest_trades(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Get trades for a backtest run."""
+    rows = conn.execute(
+        """
+        SELECT run_id, condition_id, title, signal_timestamp, predicted_outcome,
+               confidence_score, bet_size, entry_price, actual_outcome, pnl, won
+        FROM backtest_trades
+        WHERE run_id = ?
+        ORDER BY signal_timestamp ASC
+        LIMIT ?
+        """,
+        (run_id, limit),
+    ).fetchall()
+    return [
+        {
+            "run_id": r["run_id"],
+            "condition_id": r["condition_id"],
+            "title": r["title"],
+            "signal_timestamp": r["signal_timestamp"],
+            "predicted_outcome": r["predicted_outcome"],
+            "confidence_score": r["confidence_score"],
+            "bet_size": r["bet_size"],
+            "entry_price": r["entry_price"],
+            "actual_outcome": r["actual_outcome"],
+            "pnl": r["pnl"],
+            "won": bool(r["won"]) if r["won"] is not None else None,
+        }
+        for r in rows
+    ]
+
+
+def get_trades_in_timerange(
+    conn: sqlite3.Connection,
+    *,
+    start_ts: int,
+    end_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Get all trades within a time range for backtesting."""
+    if end_ts:
+        rows = conn.execute(
+            """
+            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title
+            FROM trades
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title
+            FROM trades
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+            """,
+            (start_ts,),
+        ).fetchall()
+    
+    return [
+        {
+            "wallet": r["wallet"],
+            "condition_id": r["condition_id"],
+            "outcome": r["outcome"],
+            "side": r["side"],
+            "price": r["price"],
+            "size": r["size"],
+            "timestamp": r["timestamp"],
+            "asset_id": r["asset_id"],
+            "title": r["title"],
+        }
+        for r in rows
+    ]
+
+
+def get_unique_condition_ids_in_trades(conn: sqlite3.Connection, start_ts: int) -> list[str]:
+    """Get unique condition IDs from trades after a timestamp."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT condition_id
+        FROM trades
+        WHERE timestamp >= ? AND side = 'BUY'
+        """,
+        (start_ts,),
+    ).fetchall()
+    return [r["condition_id"] for r in rows]
 

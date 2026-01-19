@@ -11,11 +11,18 @@
   :root {
     --bg: #000000;
     --fg: #f5f5f7;
-    --secondary: #86868b;
-    --border: #333333;
+    --secondary: #6e6e73;
+    --border: #2c2c2e;
     --hover: #1c1c1e;
     --surface: #000000;
   }
+}
+
+/* Ensure consistent background throughout */
+#__next,
+main {
+  background: var(--bg);
+  min-height: 100vh;
 }
 
 * {
@@ -117,6 +124,23 @@ code {
 .stat-value {
   color: var(--fg);
   font-weight: 500;
+}
+
+/* Stat blocks for backtest results */
+.statLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+
+.statValue {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.02em;
 }
 
 .btn {

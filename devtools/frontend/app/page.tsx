@@ -2,13 +2,14 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 
+import { BacktestPanel } from "@/app/components/BacktestPanel";
 import { ClustersPanel } from "@/app/components/ClustersPanel";
 import { MarketsTable } from "@/app/components/MarketsTable";
 import { SettingsPanel } from "@/app/components/SettingsPanel";
 import { WalletsPanel } from "@/app/components/WalletsPanel";
-import { DEFAULT_BACKEND_URL, getState, getWallets, refreshNow } from "@/app/lib/api";
+import { DEFAULT_BACKEND_URL, getLatestBacktest, getState, getWallets, refreshNow } from "@/app/lib/api";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type ClientSettings } from "@/app/lib/settings";
-import type { RefreshResponse, StateResponse, WalletStats } from "@/app/lib/types";
+import type { BacktestRunResponse, RefreshResponse, StateResponse, WalletStats } from "@/app/lib/types";
 
 function fmtTs(ts: number | null | undefined): string {
   if (!ts) return "—";
@@ -28,6 +29,7 @@ export default function HomePage() {
   const [state, setState] = useState<StateResponse | null>(null);
   const [refresh, setRefresh] = useState<RefreshResponse | null>(null);
   const [walletStats, setWalletStats] = useState<WalletStats[]>([]);
+  const [latestBacktest, setLatestBacktest] = useState<BacktestRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -80,6 +82,22 @@ export default function HomePage() {
       window.clearInterval(id);
     };
   }, [backendUrl, pollInterval]);
+
+  // Fetch latest backtest on mount
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchBacktest() {
+      try {
+        const result = await getLatestBacktest(backendUrl);
+        if (cancelled) return;
+        setLatestBacktest(result);
+      } catch {
+        // Silently fail
+      }
+    }
+    fetchBacktest();
+    return () => { cancelled = true; };
+  }, [backendUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -201,6 +219,9 @@ export default function HomePage() {
 
       {/* Wallets Table */}
       <WalletsPanel wallets={walletStats} />
+
+      {/* Backtest Panel */}
+      <BacktestPanel initialResult={latestBacktest} />
     </div>
   );
 }

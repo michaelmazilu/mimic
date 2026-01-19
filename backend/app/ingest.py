@@ -174,3 +174,102 @@ async def fetch_active_markets(
         pass
     return []
 
+
+async def fetch_resolved_markets(
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    limit: int = 500,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Fetch closed markets with resolution data from CLOB API.
+    Returns list of dicts with condition_id, winning_outcome, end_date.
+    """
+    url = f"{settings.clob_base}/markets"
+    results: list[dict[str, Any]] = []
+    
+    try:
+        # The CLOB API returns data in a "data" wrapper
+        resp = await _get_json(
+            client,
+            url,
+            sem=sem,
+            params={"closed": "true", "limit": limit, "offset": offset},
+            headers={"User-Agent": settings.user_agent},
+        )
+        
+        # Handle both direct list and wrapped response
+        markets = resp.get("data", []) if isinstance(resp, dict) else resp
+        
+        for m in markets:
+            tokens = m.get("tokens", [])
+            # Find the winning outcome from tokens
+            winner = None
+            for t in tokens:
+                if t.get("winner") is True:
+                    winner = t.get("outcome")
+                    break
+            
+            if winner:
+                # Parse end_date_iso to timestamp if available
+                end_date_iso = m.get("end_date_iso")
+                resolved_at = None
+                if end_date_iso:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+                        resolved_at = int(dt.timestamp())
+                    except Exception:
+                        pass
+                
+                results.append({
+                    "condition_id": m.get("condition_id"),
+                    "winning_outcome": winner,
+                    "end_date": end_date_iso,
+                    "resolved_at": resolved_at,
+                    "question": m.get("question"),
+                })
+    except Exception as e:
+        # Log but don't fail - we can retry later
+        import logging
+        logging.warning(f"Failed to fetch resolved markets: {e}")
+    
+    return results
+
+
+async def fetch_all_resolved_markets(
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    max_pages: int = 10,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Fetch multiple pages of resolved markets.
+    """
+    all_results: list[dict[str, Any]] = []
+    
+    for page in range(max_pages):
+        offset = page * page_size
+        results = await fetch_resolved_markets(
+            settings,
+            client=client,
+            sem=sem,
+            limit=page_size,
+            offset=offset,
+        )
+        
+        if not results:
+            break
+            
+        all_results.extend(results)
+        
+        # If we got fewer than requested, we've reached the end
+        if len(results) < page_size:
+            break
+    
+    return all_results
+

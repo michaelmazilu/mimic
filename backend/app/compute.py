@@ -106,36 +106,60 @@ def _compute_confidence_score(
     tight_band: bool,
     cooked: bool,
     participants: int,
+    total_participants: int,
 ) -> float:
     """
     Compute an overall confidence score for a market signal.
     
+    The score is heavily penalized for low participant counts since
+    1-2 traders agreeing is not statistically significant.
+    
     Factors:
-    - Weighted consensus (most important - 40%)
-    - Raw consensus (20%)
-    - Entry price tightness (20%)
-    - Not cooked / price hasn't moved (15%)
-    - Number of participants (5%)
+    - Participant count (most important - caps the max score)
+    - Weighted consensus (25% of capped max)
+    - Raw consensus (15% of capped max)
+    - Entry price tightness (10% of capped max)
+    - Not cooked (10% of capped max)
     """
-    # Weighted consensus contribution (0-40 points)
-    weighted_score = weighted_consensus * 40
+    # CRITICAL: Cap the maximum possible score based on participant count
+    # 1 participant = max 15%, 2 = max 30%, 3 = max 45%, 5 = max 60%, 10+ = max 80%
+    if total_participants <= 1:
+        max_score = 0.15
+    elif total_participants == 2:
+        max_score = 0.30
+    elif total_participants == 3:
+        max_score = 0.45
+    elif total_participants <= 5:
+        max_score = 0.55
+    elif total_participants <= 10:
+        max_score = 0.70
+    else:
+        max_score = 0.85
+    
+    # Base score components (out of 100 points raw)
+    # Weighted consensus contribution (0-35 points)
+    weighted_score = weighted_consensus * 35
     
     # Raw consensus contribution (0-20 points)
     raw_score = consensus_percent * 20
     
-    # Tight band contribution (0-20 points)
-    tight_score = 20 if tight_band else 0
+    # Tight band contribution (0-15 points)
+    tight_score = 15 if tight_band else 0
     
     # Not cooked contribution (0-15 points)
     cooked_score = 15 if not cooked else 0
     
-    # Participants contribution (0-5 points, scaled logarithmically)
+    # Participants contribution (0-15 points, scaled logarithmically)
     # More participants = more confidence, but diminishing returns
-    participant_score = min(5, np.log1p(participants) * 1.5)
+    # log1p(10) * 2.5 = ~6, log1p(50) * 2.5 = ~10, log1p(100) * 2.5 = ~12
+    participant_score = min(15, np.log1p(participants) * 3)
     
-    total = weighted_score + raw_score + tight_score + cooked_score + participant_score
-    # Normalize to 0-1 range
-    return total / 100.0
+    # Calculate raw score (0-100 scale)
+    raw_total = weighted_score + raw_score + tight_score + cooked_score + participant_score
+    raw_normalized = raw_total / 100.0
+    
+    # Apply participant cap
+    return min(raw_normalized, max_score)
 
 
 async def compute_and_store(
@@ -295,6 +319,7 @@ async def compute_and_store(
             r["tight_band"],
             r["cooked"],
             r["participants"],
+            r["total_participants"],
         )
 
     db.replace_market_state(conn, market_rows)

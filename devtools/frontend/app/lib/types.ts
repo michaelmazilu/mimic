@@ -105,3 +105,52 @@ export type WalletsListResponse = {
   totalCount: number;
 };
 
+// Backtest Types
+export type BacktestConfig = {
+  minConfidence: number;
+  betSizing: string;
+  baseBet: number;
+  maxBet: number;
+  lookbackDays: number;
+  minParticipants: number;
+};
+
+export type BacktestTrade = {
+  conditionId: string;
+  title?: string | null;
+  signalTimestamp: number;
+  predictedOutcome: string;
+  confidenceScore: number;
+  betSize: number;
+  entryPrice?: number | null;
+  actualOutcome?: string | null;
+  pnl?: number | null;
+  won?: boolean | null;
+};
+
+export type EquityCurvePoint = {
+  timestamp: number;
+  equity: number;
+  pnl: number;
+  trade_count?: number;
+};
+
+export type BacktestRunResponse = {
+  runId: string;
+  status: string;
+  config: BacktestConfig;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  pendingTrades: number;
+  winRate: number;
+  totalPnl: number;
+  totalInvested: number;
+  roi: number;
+  maxDrawdown: number;
+  sharpeRatio: number;
+  profitFactor: number;
+  trades: BacktestTrade[];
+  equityCurve: EquityCurvePoint[];
+};
+
