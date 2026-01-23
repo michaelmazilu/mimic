@@ -31,7 +31,7 @@ export function loadSettings(): ClientSettings {
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return DEFAULT_SETTINGS;
     const nWallets = clampInt(Number(parsed.nWallets), 1, 2500);
-    const tradesLimit = clampInt(Number(parsed.tradesLimit), 1, 200);
+  const tradesLimit = clampInt(Number(parsed.tradesLimit), 1, 500);
     const pollIntervalMs = clampInt(Number(parsed.pollIntervalMs), 250, 60000);
     const refreshIntervalMs = clampInt(Number(parsed.refreshIntervalMs), 1000, 10 * 60 * 1000);
     return { nWallets, tradesLimit, pollIntervalMs, refreshIntervalMs };

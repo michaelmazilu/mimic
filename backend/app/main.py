@@ -162,7 +162,7 @@ class RefreshManager:
                 effective_trades_limit = _clamp_int(
                     trades_limit if trades_limit is not None else self.settings.trades_limit,
                     lo=1,
-                    hi=200,
+                    hi=500,
                 )
                 outbound_concurrency = _clamp_int(
                     self.settings.outbound_concurrency, lo=1, hi=5
@@ -174,7 +174,7 @@ class RefreshManager:
 
                 timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    candidate_count = min(2500, max(effective_n_wallets, effective_n_wallets * 3))
+                    candidate_count = 30000
                     leaderboard = await ingest.fetch_leaderboard(
                         self.settings,
                         client=client,
@@ -261,14 +261,6 @@ class RefreshManager:
                         limit=effective_n_wallets,
                         config=selection_cfg,
                     )
-
-                    if len(selected_wallets) < effective_n_wallets:
-                        for w in wallets:
-                            if w in selected_wallets:
-                                continue
-                            selected_wallets.append(w)
-                            if len(selected_wallets) >= effective_n_wallets:
-                                break
 
                     selected_entries = [
                         entries_by_wallet[w] for w in selected_wallets if w in entries_by_wallet

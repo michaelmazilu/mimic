@@ -328,13 +328,12 @@ async def compute_and_store(
             r["total_participants"],
         )
         mean_entry = r.get("mean_entry")
-        entry_ok = mean_entry is not None and 0.30 <= float(mean_entry) < 0.60
-        consensus_ok = float(r["consensus_percent"]) >= 0.60
+        entry_ok = mean_entry is not None and 0.35 <= float(mean_entry) < 0.65
+        consensus_ok = float(r["consensus_percent"]) >= 0.45
         # Optimized readiness filter from backtest sweep.
         r["ready"] = (
-            int(r["total_participants"]) >= 3
+            int(r["total_participants"]) >= 2
             and float(r["confidence_score"]) >= 0.20
-            and bool(r["tight_band"])
             and entry_ok
             and consensus_ok
         )

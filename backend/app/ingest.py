@@ -40,13 +40,23 @@ async def fetch_leaderboard(
     offset = 0
     
     while len(all_entries) < target_count:
-        data = await _get_json(
-            client,
-            url,
-            sem=sem,
-            params={"limit": page_size, "offset": offset},
-            headers={"User-Agent": settings.user_agent},
-        )
+        retries = 0
+        while True:
+            try:
+                data = await _get_json(
+                    client,
+                    url,
+                    sem=sem,
+                    params={"limit": page_size, "offset": offset},
+                    headers={"User-Agent": settings.user_agent},
+                )
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 429 and retries < 5:
+                    await asyncio.sleep(2 ** retries)
+                    retries += 1
+                    continue
+                raise
         if not isinstance(data, list):
             raise IngestError("Unexpected leaderboard response shape")
         

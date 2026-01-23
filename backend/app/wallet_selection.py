@@ -16,8 +16,10 @@ class BotFilterConfig:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    min_resolved_trades: int = 10
-    max_sports_ratio: float = 0.50
+    min_accuracy: float = 0.90
+    min_resolved_trades: int = 50
+    max_sports_ratio: float = 0.05
+    allow_fallback: bool = False
     bot_filters: BotFilterConfig = BotFilterConfig()
 
 
@@ -216,6 +218,7 @@ def select_wallets_by_accuracy(
     def is_eligible(m: WalletMetrics) -> bool:
         return (
             not m.is_bot
+            and m.win_rate >= config.min_accuracy
             and m.sports_ratio <= config.max_sports_ratio
             and m.resolved_trades >= config.min_resolved_trades
         )
@@ -230,6 +233,9 @@ def select_wallets_by_accuracy(
 
     eligible = [m for m in metrics_list if is_eligible(m)]
     eligible.sort(key=sort_key, reverse=True)
+
+    if not config.allow_fallback:
+        return [m.wallet for m in eligible[:limit]]
 
     if len(eligible) >= limit:
         return [m.wallet for m in eligible[:limit]]
