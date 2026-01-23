@@ -10,7 +10,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import backtest, compute, db, ingest
+from . import backtest, compute, db, ingest, wallet_selection
 from .config import Settings, get_settings
 from .models import (
     BacktestConfigModel,
@@ -157,7 +157,7 @@ class RefreshManager:
                 effective_n_wallets = _clamp_int(
                     n_wallets if n_wallets is not None else self.settings.n_wallets,
                     lo=1,
-                    hi=500,
+                    hi=2500,
                 )
                 effective_trades_limit = _clamp_int(
                     trades_limit if trades_limit is not None else self.settings.trades_limit,
@@ -174,21 +174,26 @@ class RefreshManager:
 
                 timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
+                    candidate_count = min(2500, max(effective_n_wallets, effective_n_wallets * 3))
                     leaderboard = await ingest.fetch_leaderboard(
                         self.settings,
                         client=client,
                         sem=sem,
-                        target_count=effective_n_wallets,
+                        target_count=candidate_count,
                     )
-                    leaderboard_top = leaderboard[:effective_n_wallets]
-                    wallets = []
-                    for entry in leaderboard_top:
-                        w = entry.get("proxyWallet") or entry.get("wallet") or entry.get("address")
-                        if w:
-                            wallets.append(str(w).lower())
-                    # de-dupe preserving order
+                    entries_by_wallet: dict[str, dict[str, Any]] = {}
+                    wallets: list[str] = []
                     seen = set()
-                    wallets = [w for w in wallets if not (w in seen or seen.add(w))]
+                    for entry in leaderboard:
+                        w = entry.get("proxyWallet") or entry.get("wallet") or entry.get("address")
+                        if not w:
+                            continue
+                        w_lc = str(w).lower()
+                        if w_lc in seen:
+                            continue
+                        seen.add(w_lc)
+                        wallets.append(w_lc)
+                        entries_by_wallet[w_lc] = entry
 
                     trade_tasks = [
                         ingest.fetch_trades_for_wallet(
@@ -201,18 +206,115 @@ class RefreshManager:
                         for w in wallets
                     ]
                     trade_results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+                    trades_by_wallet: dict[str, list[dict[str, Any]]] = {}
+                    for w, result in zip(wallets, trade_results, strict=True):
+                        if isinstance(result, Exception):
+                            continue
+                        trades_by_wallet[w] = list(result)
 
                     with db.db_conn(self.settings.db_path) as conn:
-                        wallet_upserts = db.upsert_wallets(conn, leaderboard_top)
-                        for w, result in zip(wallets, trade_results, strict=True):
-                            if isinstance(result, Exception):
+                        cached_resolutions = db.get_all_resolutions(conn)
+
+                    condition_ids = sorted(
+                        {
+                            str(t.get("conditionId") or t.get("condition_id"))
+                            for trades in trades_by_wallet.values()
+                            for t in trades
+                            if t.get("conditionId") or t.get("condition_id")
+                        }
+                    )
+                    missing_ids = [cid for cid in condition_ids if cid not in cached_resolutions]
+                    fetched_resolutions: dict[str, str] = {}
+                    if missing_ids:
+                        fetched_resolutions = await ingest.fetch_market_resolutions(
+                            missing_ids,
+                            self.settings,
+                            client=client,
+                            sem=sem,
+                        )
+                    resolutions = dict(cached_resolutions)
+                    resolutions.update(fetched_resolutions)
+
+                    if fetched_resolutions:
+                        with db.db_conn(self.settings.db_path) as conn:
+                            db.bulk_upsert_resolutions(
+                                conn,
+                                [
+                                    {
+                                        "condition_id": cid,
+                                        "winning_outcome": winner,
+                                        "resolved_at": now,
+                                    }
+                                    for cid, winner in fetched_resolutions.items()
+                                ],
+                            )
+
+                    selection_cfg = wallet_selection.SelectionConfig()
+                    wallet_metrics = wallet_selection.compute_wallet_metrics(
+                        trades_by_wallet,
+                        resolutions,
+                        now_ts=now,
+                        config=selection_cfg,
+                    )
+                    selected_wallets = wallet_selection.select_wallets_by_accuracy(
+                        wallet_metrics.values(),
+                        limit=effective_n_wallets,
+                        config=selection_cfg,
+                    )
+
+                    if len(selected_wallets) < effective_n_wallets:
+                        for w in wallets:
+                            if w in selected_wallets:
                                 continue
-                            trade_inserts += db.insert_trades(conn, w, list(result))
+                            selected_wallets.append(w)
+                            if len(selected_wallets) >= effective_n_wallets:
+                                break
+
+                    selected_entries = [
+                        entries_by_wallet[w] for w in selected_wallets if w in entries_by_wallet
+                    ]
+
+                    with db.db_conn(self.settings.db_path) as conn:
+                        wallet_upserts = db.upsert_wallets(conn, selected_entries)
+                        for w in selected_wallets:
+                            trades = trades_by_wallet.get(w)
+                            if not trades:
+                                continue
+                            trade_inserts += db.insert_trades(conn, w, trades)
+
+                        stats_rows = []
+                        for w in selected_wallets:
+                            m = wallet_metrics.get(w)
+                            if not m:
+                                continue
+                            resolved = m.resolved_trades
+                            stats_rows.append(
+                                {
+                                    "wallet": w,
+                                    "total_trades": m.total_trades,
+                                    "won_trades": m.wins,
+                                    "lost_trades": resolved - m.wins,
+                                    "pending_trades": m.total_trades - resolved,
+                                    "win_rate": m.win_rate,
+                                    "total_pnl": m.total_pnl,
+                                    "avg_roi": m.avg_roi,
+                                    "recent_trades_7d": m.recent_trades_7d,
+                                    "recent_won_7d": m.recent_won_7d,
+                                    "recent_accuracy_7d": m.recent_accuracy_7d,
+                                    "recent_trades_30d": m.recent_trades_30d,
+                                    "recent_won_30d": m.recent_won_30d,
+                                    "recent_accuracy_30d": m.recent_accuracy_30d,
+                                    "streak": 0,
+                                    "last_trade_timestamp": m.last_trade_ts,
+                                }
+                            )
+                        if stats_rows:
+                            db.bulk_upsert_wallet_stats(conn, stats_rows)
 
                         await compute.compute_and_store(
                             conn,
                             self.settings,
-                            wallets=wallets,
+                            wallets=selected_wallets,
                             client=client,
                             sem=sem,
                         )
@@ -314,7 +416,7 @@ async def health() -> HealthResponse:
 
 @app.get("/refresh", response_model=RefreshResponse)
 async def refresh(
-    n_wallets: int | None = Query(default=None, ge=1, le=500),
+    n_wallets: int | None = Query(default=None, ge=1, le=2500),
     trades_limit: int | None = Query(default=None, ge=1, le=500),
 ) -> RefreshResponse:
     return await refresh_manager.refresh_if_due(n_wallets=n_wallets, trades_limit=trades_limit)
@@ -655,4 +757,3 @@ async def get_latest_backtest() -> BacktestRunResponse | None:
         ],
         equityCurve=equity_curve,
     )
-

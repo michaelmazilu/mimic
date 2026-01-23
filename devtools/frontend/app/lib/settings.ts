@@ -1,11 +1,13 @@
 export type ClientSettings = {
   nWallets: number;
+  tradesLimit: number;
   pollIntervalMs: number;
   refreshIntervalMs: number;
 };
 
 export const DEFAULT_SETTINGS: ClientSettings = {
   nWallets: 500,
+  tradesLimit: 150,
   pollIntervalMs: 2000,
   refreshIntervalMs: 60000
 };
@@ -28,10 +30,11 @@ export function loadSettings(): ClientSettings {
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return DEFAULT_SETTINGS;
-    const nWallets = clampInt(Number(parsed.nWallets), 1, 500);
+    const nWallets = clampInt(Number(parsed.nWallets), 1, 2500);
+    const tradesLimit = clampInt(Number(parsed.tradesLimit), 1, 200);
     const pollIntervalMs = clampInt(Number(parsed.pollIntervalMs), 250, 60000);
     const refreshIntervalMs = clampInt(Number(parsed.refreshIntervalMs), 1000, 10 * 60 * 1000);
-    return { nWallets, pollIntervalMs, refreshIntervalMs };
+    return { nWallets, tradesLimit, pollIntervalMs, refreshIntervalMs };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -45,4 +48,3 @@ export function saveSettings(s: ClientSettings): void {
     // ignore
   }
 }
-

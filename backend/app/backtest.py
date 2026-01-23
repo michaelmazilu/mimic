@@ -18,6 +18,7 @@ import numpy as np
 
 from . import db
 from .config import Settings
+from .market_filters import is_sports_market
 # Resolution fetching is now done inline per-market
 
 
@@ -30,6 +31,12 @@ class BacktestConfig:
     max_bet: float = 500.0
     lookback_days: int = 180
     min_participants: int = 2  # Minimum traders for a valid signal
+    min_total_participants: int = 3
+    consensus_min: float = 0.60
+    entry_min: float = 0.30
+    entry_max: float = 0.60
+    require_tight_band: bool = True
+    exclude_sports: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,25 +144,21 @@ def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
     return band_min, band_max, mean, stddev
 
 
-def compute_signal_at_time(
+def compute_signal_stats_at_time(
     trades: list[dict[str, Any]],
     cutoff_timestamp: int,
-    config: BacktestConfig,
 ) -> dict[str, Any] | None:
     """
-    Compute signal for a market using only trades up to cutoff_timestamp.
+    Compute signal stats for a market using only trades up to cutoff_timestamp.
     This prevents look-ahead bias in backtesting.
     
-    Returns signal dict if confidence meets threshold, None otherwise.
+    Returns signal stats dict or None if no usable trades.
     """
     # Filter to only BUY trades before cutoff
     relevant_trades = [
         t for t in trades
         if t.get("side") == "BUY" and (t.get("timestamp") or 0) <= cutoff_timestamp
     ]
-    
-    if len(relevant_trades) < config.min_participants:
-        return None
     
     # Group by outcome
     outcomes: dict[str, list[dict]] = defaultdict(list)
@@ -184,7 +187,7 @@ def compute_signal_at_time(
     if prices:
         band_min, band_max, mean_entry, stddev = _compute_band(prices)
         tight_band = ((band_max - band_min) <= 0.03) or (stddev <= 0.01)
-    
+
     # Compute confidence score with participant-based cap
     # Cap max score based on participant count (same logic as compute.py)
     if total_participants <= 1:
@@ -210,9 +213,6 @@ def compute_signal_at_time(
     raw_total = weighted_score + raw_score + tight_score + cooked_score + participant_score
     confidence_score = min(raw_total / 100.0, max_score)
     
-    if confidence_score < config.min_confidence:
-        return None
-    
     return {
         "condition_id": trades[0].get("condition_id"),
         "title": title,
@@ -225,6 +225,42 @@ def compute_signal_at_time(
         "tight_band": tight_band,
         "signal_timestamp": cutoff_timestamp,
     }
+
+
+def compute_signal_at_time(
+    trades: list[dict[str, Any]],
+    cutoff_timestamp: int,
+    config: BacktestConfig,
+) -> dict[str, Any] | None:
+    """
+    Compute signal for a market using only trades up to cutoff_timestamp.
+    This prevents look-ahead bias in backtesting.
+    
+    Returns signal dict if it passes configured filters, None otherwise.
+    """
+    signal = compute_signal_stats_at_time(trades, cutoff_timestamp)
+    if not signal:
+        return None
+
+    if signal["total_participants"] < config.min_total_participants:
+        return None
+
+    if config.require_tight_band and not signal["tight_band"]:
+        return None
+
+    mean_entry = signal.get("mean_entry")
+    if mean_entry is None:
+        return None
+    if mean_entry < config.entry_min or mean_entry >= config.entry_max:
+        return None
+
+    if signal["consensus_percent"] < config.consensus_min:
+        return None
+
+    if signal["confidence_score"] < config.min_confidence:
+        return None
+
+    return signal
 
 
 def calculate_pnl(
@@ -435,6 +471,22 @@ async def run_backtest(
             
             if not sorted_trades:
                 continue
+
+            if config.exclude_sports:
+                event_slug = None
+                slug = None
+                title = None
+                for t in sorted_trades:
+                    if title is None and t.get("title"):
+                        title = str(t.get("title"))
+                    if event_slug is None and t.get("event_slug"):
+                        event_slug = str(t.get("event_slug"))
+                    if slug is None and t.get("slug"):
+                        slug = str(t.get("slug"))
+                    if title and event_slug and slug:
+                        break
+                if is_sports_market(event_slug=event_slug, slug=slug, title=title):
+                    continue
             
             # Use the timestamp when we would have had enough data
             # (after min_participants trades)

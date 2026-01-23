@@ -27,9 +27,20 @@ export function SettingsPanel({
             className="input"
             type="number"
             min={1}
-            max={500}
+            max={2500}
             value={settings.nWallets}
             onChange={(e) => onChange({ ...settings, nWallets: Number(e.target.value) })}
+          />
+        </div>
+        <div>
+          <div className="label">Trades per wallet</div>
+          <input
+            className="input"
+            type="number"
+            min={1}
+            max={200}
+            value={settings.tradesLimit}
+            onChange={(e) => onChange({ ...settings, tradesLimit: Number(e.target.value) })}
           />
         </div>
         <div>

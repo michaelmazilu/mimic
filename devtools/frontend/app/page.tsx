@@ -103,7 +103,10 @@ export default function HomePage() {
     let cancelled = false;
     async function tick() {
       try {
-        const r = await refreshNow(backendUrl, { nWallets: settings.nWallets });
+        const r = await refreshNow(backendUrl, {
+          nWallets: settings.nWallets,
+          tradesLimit: settings.tradesLimit
+        });
         if (cancelled) return;
         setRefresh(r);
       } catch (e) {
@@ -117,7 +120,7 @@ export default function HomePage() {
           walletUpserts: 0,
           tradeInserts: 0,
           nWallets: settings.nWallets,
-          tradesLimit: null,
+          tradesLimit: settings.tradesLimit,
           error: e instanceof Error ? e.message : String(e)
         });
       }
@@ -128,7 +131,14 @@ export default function HomePage() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [backendUrl, refreshInterval, settings.nWallets, state?.lastRefreshTs, state?.nextRefreshEarliestTs]);
+  }, [
+    backendUrl,
+    refreshInterval,
+    settings.nWallets,
+    settings.tradesLimit,
+    state?.lastRefreshTs,
+    state?.nextRefreshEarliestTs
+  ]);
 
   const markets = state?.markets ?? [];
   const clusters = state?.clusters ?? [];
@@ -208,7 +218,10 @@ export default function HomePage() {
             settings={settings}
             onChange={(next) => setSettings(next)}
             onRefreshNow={async () => {
-              const r = await refreshNow(backendUrl, { nWallets: settings.nWallets });
+              const r = await refreshNow(backendUrl, {
+                nWallets: settings.nWallets,
+                tradesLimit: settings.tradesLimit
+              });
               setRefresh(r);
             }}
             refreshInProgress={state?.refreshInProgress ?? false}

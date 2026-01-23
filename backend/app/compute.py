@@ -10,6 +10,7 @@ import sqlite3
 from . import clustering, db
 from .config import Settings
 from .ingest import fetch_orderbook, fetch_active_markets
+from .market_filters import is_sports_market
 
 
 def _safe_float(x: Any) -> float | None:
@@ -193,6 +194,8 @@ async def compute_and_store(
             "timestamp": r["timestamp"],
             "asset_id": r["asset_id"],
             "title": r["title"],
+            "slug": r["slug"],
+            "event_slug": r["event_slug"],
         }
 
     by_condition: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -205,12 +208,21 @@ async def compute_and_store(
     for condition_id, recs in by_condition.items():
         outcomes: dict[str, list[dict[str, Any]]] = defaultdict(list)
         title = None
+        slug = None
+        event_slug = None
         for rec in recs:
             outcomes[str(rec["outcome"])].append(rec)
             if title is None and rec.get("title"):
                 title = str(rec.get("title"))
+            if slug is None and rec.get("slug"):
+                slug = str(rec.get("slug"))
+            if event_slug is None and rec.get("event_slug"):
+                event_slug = str(rec.get("event_slug"))
 
         if not outcomes:
+            continue
+
+        if is_sports_market(event_slug=event_slug, slug=slug, title=title):
             continue
 
         leading_outcome, leading_recs = max(outcomes.items(), key=lambda kv: len(kv[1]))
@@ -306,12 +318,6 @@ async def compute_and_store(
         else:
             r["price_unavailable"] = False
             r["cooked"] = abs(float(midpoint) - float(r["mean_entry"])) > 0.05
-        r["ready"] = (
-            float(r["weighted_consensus_percent"]) >= 0.75 
-            and bool(r["tight_band"]) 
-            and not bool(r["cooked"])
-        )
-        
         # Compute confidence score
         r["confidence_score"] = _compute_confidence_score(
             r["weighted_consensus_percent"],
@@ -320,6 +326,17 @@ async def compute_and_store(
             r["cooked"],
             r["participants"],
             r["total_participants"],
+        )
+        mean_entry = r.get("mean_entry")
+        entry_ok = mean_entry is not None and 0.30 <= float(mean_entry) < 0.60
+        consensus_ok = float(r["consensus_percent"]) >= 0.60
+        # Optimized readiness filter from backtest sweep.
+        r["ready"] = (
+            int(r["total_participants"]) >= 3
+            and float(r["confidence_score"]) >= 0.20
+            and bool(r["tight_band"])
+            and entry_ok
+            and consensus_ok
         )
 
     db.replace_market_state(conn, market_rows)
@@ -346,4 +363,3 @@ async def compute_and_store(
     db.replace_clusters(conn, cluster_rows)
 
     return market_rows, cluster_rows
-

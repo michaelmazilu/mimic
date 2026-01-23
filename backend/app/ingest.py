@@ -172,7 +172,45 @@ async def fetch_active_markets(
             return data
     except Exception:
         pass
-    return []
+    return []        
+
+
+async def fetch_market_resolutions(
+    condition_ids: list[str],
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+) -> dict[str, str]:
+    """
+    Fetch resolution winners for specific condition IDs from CLOB API.
+    Returns dict: condition_id -> winning_outcome.
+    """
+    resolutions: dict[str, str] = {}
+
+    async def fetch_one(condition_id: str) -> None:
+        url = f"{settings.clob_base}/markets/{condition_id}"
+        try:
+            async with sem:
+                resp = await client.get(url, headers={"User-Agent": settings.user_agent})
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            if not data.get("closed"):
+                return
+            for token in data.get("tokens", []):
+                if token.get("winner"):
+                    resolutions[condition_id] = str(token.get("outcome"))
+                    return
+        except Exception:
+            return
+
+    batch_size = 50
+    for i in range(0, len(condition_ids), batch_size):
+        batch = condition_ids[i:i + batch_size]
+        await asyncio.gather(*[fetch_one(cid) for cid in batch])
+
+    return resolutions
 
 
 async def fetch_resolved_markets(
@@ -272,4 +310,3 @@ async def fetch_all_resolved_markets(
             break
     
     return all_results
-

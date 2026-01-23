@@ -405,7 +405,7 @@ def get_all_wallets(conn: sqlite3.Connection, *, limit: int | None = None) -> li
 def get_all_buy_trades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title
+        SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
         FROM trades
         WHERE side = 'BUY'
         ORDER BY timestamp DESC
@@ -982,6 +982,66 @@ def get_all_wallet_stats(
     ]
 
 
+def bulk_upsert_wallet_stats(conn: sqlite3.Connection, stats: list[dict[str, Any]]) -> int:
+    """Bulk insert/update wallet_stats from precomputed metrics."""
+    if not stats:
+        return 0
+    now = _utc_ts()
+    rows = [
+        (
+            s["wallet"],
+            s.get("total_trades", 0),
+            s.get("won_trades", 0),
+            s.get("lost_trades", 0),
+            s.get("pending_trades", 0),
+            s.get("win_rate", 0.0),
+            s.get("total_pnl", 0.0),
+            s.get("avg_roi", 0.0),
+            s.get("recent_trades_7d", 0),
+            s.get("recent_won_7d", 0),
+            s.get("recent_accuracy_7d", 0.0),
+            s.get("recent_trades_30d", 0),
+            s.get("recent_won_30d", 0),
+            s.get("recent_accuracy_30d", 0.0),
+            s.get("streak", 0),
+            s.get("last_trade_timestamp"),
+            now,
+        )
+        for s in stats
+    ]
+    conn.executemany(
+        """
+        INSERT INTO wallet_stats(
+          wallet, total_trades, won_trades, lost_trades, pending_trades,
+          win_rate, total_pnl, avg_roi,
+          recent_trades_7d, recent_won_7d, recent_accuracy_7d,
+          recent_trades_30d, recent_won_30d, recent_accuracy_30d,
+          streak, last_trade_timestamp, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(wallet) DO UPDATE SET
+          total_trades = excluded.total_trades,
+          won_trades = excluded.won_trades,
+          lost_trades = excluded.lost_trades,
+          pending_trades = excluded.pending_trades,
+          win_rate = excluded.win_rate,
+          total_pnl = excluded.total_pnl,
+          avg_roi = excluded.avg_roi,
+          recent_trades_7d = excluded.recent_trades_7d,
+          recent_won_7d = excluded.recent_won_7d,
+          recent_accuracy_7d = excluded.recent_accuracy_7d,
+          recent_trades_30d = excluded.recent_trades_30d,
+          recent_won_30d = excluded.recent_won_30d,
+          recent_accuracy_30d = excluded.recent_accuracy_30d,
+          streak = excluded.streak,
+          last_trade_timestamp = excluded.last_trade_timestamp,
+          updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+    return len(rows)
+
+
 def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
     """Get a mapping of wallet -> recent_accuracy_7d for weighting consensus."""
     rows = conn.execute(
@@ -1332,7 +1392,7 @@ def get_trades_in_timerange(
     if end_ts:
         rows = conn.execute(
             """
-            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title
+            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
             FROM trades
             WHERE timestamp >= ? AND timestamp <= ?
             ORDER BY timestamp ASC
@@ -1342,7 +1402,7 @@ def get_trades_in_timerange(
     else:
         rows = conn.execute(
             """
-            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title
+            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
             FROM trades
             WHERE timestamp >= ?
             ORDER BY timestamp ASC
@@ -1361,6 +1421,8 @@ def get_trades_in_timerange(
             "timestamp": r["timestamp"],
             "asset_id": r["asset_id"],
             "title": r["title"],
+            "slug": r["slug"],
+            "event_slug": r["event_slug"],
         }
         for r in rows
     ]
@@ -1377,4 +1439,3 @@ def get_unique_condition_ids_in_trades(conn: sqlite3.Connection, start_ts: int) 
         (start_ts,),
     ).fetchall()
     return [r["condition_id"] for r in rows]
-
