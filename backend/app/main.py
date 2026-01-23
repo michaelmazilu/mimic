@@ -570,6 +570,8 @@ async def run_backtest_endpoint(
         bet_sizing=config.betSizing if config else "scaled",
         base_bet=config.baseBet if config else 100.0,
         max_bet=config.maxBet if config else 500.0,
+        starting_bankroll=config.startingBankroll if config else 100.0,
+        bet_fraction=config.betFraction if config else 0.02,
         lookback_days=config.lookbackDays if config else 180,
         min_participants=config.minParticipants if config else 2,
     )
@@ -600,6 +602,8 @@ async def run_backtest_endpoint(
             betSizing=bt_config.bet_sizing,
             baseBet=bt_config.base_bet,
             maxBet=bt_config.max_bet,
+            startingBankroll=bt_config.starting_bankroll,
+            betFraction=bt_config.bet_fraction,
             lookbackDays=bt_config.lookback_days,
             minParticipants=bt_config.min_participants,
         ),

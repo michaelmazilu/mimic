@@ -29,6 +29,8 @@ class BacktestConfig:
     bet_sizing: str = "scaled"  # flat, kelly, scaled
     base_bet: float = 100.0
     max_bet: float = 500.0
+    starting_bankroll: float = 100.0
+    bet_fraction: float = 0.02
     lookback_days: int = 180
     min_participants: int = 2  # Minimum traders for a valid signal
     min_total_participants: int = 3
@@ -132,6 +134,21 @@ def calculate_bet_size(confidence: float, config: BacktestConfig) -> float:
         return max(config.base_bet, kelly_bet)
     else:
         return config.base_bet
+
+
+def _apply_bankroll_sizing(trades: list[BacktestTrade], config: BacktestConfig) -> None:
+    bankroll = config.starting_bankroll
+    for trade in sorted(trades, key=lambda x: x.signal_timestamp):
+        if bankroll <= 0:
+            trade.bet_size = 0.0
+            trade.pnl = 0.0
+            continue
+        bet_size = bankroll * config.bet_fraction
+        if bet_size > bankroll:
+            bet_size = bankroll
+        trade.bet_size = bet_size
+        trade.pnl = calculate_pnl(bet_size, trade.entry_price, bool(trade.won))
+        bankroll += trade.pnl
 
 
 def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
@@ -507,10 +524,14 @@ async def run_backtest(
             predicted_outcome = signal["leading_outcome"]
             actual_outcome = resolutions[condition_id]
             won = predicted_outcome == actual_outcome
-            
-            bet_size = calculate_bet_size(signal["confidence_score"], config)
             entry_price = signal.get("mean_entry")
-            pnl = calculate_pnl(bet_size, entry_price, won)
+            
+            if config.bet_sizing == "bankroll":
+                bet_size = 0.0
+                pnl = 0.0
+            else:
+                bet_size = calculate_bet_size(signal["confidence_score"], config)
+                pnl = calculate_pnl(bet_size, entry_price, won)
             
             trade = BacktestTrade(
                 condition_id=condition_id,
@@ -527,6 +548,9 @@ async def run_backtest(
             backtest_trades.append(trade)
         
         # Step 4: Aggregate results
+        if config.bet_sizing == "bankroll":
+            _apply_bankroll_sizing(backtest_trades, config)
+
         metrics = compute_metrics(backtest_trades)
         
         result.trades = backtest_trades

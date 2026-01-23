@@ -138,6 +138,8 @@ class BacktestConfigModel(BaseModel):
     betSizing: str = "scaled"  # flat, kelly, scaled
     baseBet: float = 100.0
     maxBet: float = 500.0
+    startingBankroll: float = 100.0
+    betFraction: float = 0.02
     lookbackDays: int = 180
     minParticipants: int = 2
 
@@ -174,4 +176,3 @@ class BacktestRunResponse(BaseModel):
     profitFactor: float = 0.0
     trades: list[BacktestTradeModel] = Field(default_factory=list)
     equityCurve: list[dict[str, Any]] = Field(default_factory=list)
-
