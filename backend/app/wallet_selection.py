@@ -16,8 +16,8 @@ class BotFilterConfig:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    min_accuracy: float = 0.90
-    min_resolved_trades: int = 50
+    min_accuracy: float = 0.70
+    min_resolved_trades: int = 20
     max_sports_ratio: float = 0.05
     allow_fallback: bool = False
     bot_filters: BotFilterConfig = BotFilterConfig()

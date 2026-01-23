@@ -31,6 +31,9 @@ class BacktestConfig:
     max_bet: float = 500.0
     starting_bankroll: float = 100.0
     bet_fraction: float = 0.02
+    allow_single_perfect: bool = True
+    perfect_accuracy: float = 1.0
+    min_perfect_resolved_trades: int = 20
     lookback_days: int = 180
     min_participants: int = 2  # Minimum traders for a valid signal
     min_total_participants: int = 3
@@ -164,6 +167,8 @@ def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
 def compute_signal_stats_at_time(
     trades: list[dict[str, Any]],
     cutoff_timestamp: int,
+    *,
+    perfect_wallets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """
     Compute signal stats for a market using only trades up to cutoff_timestamp.
@@ -189,8 +194,19 @@ def compute_signal_stats_at_time(
     if not outcomes:
         return None
     
-    # Find leading outcome (most traders betting on it)
-    leading_outcome, leading_trades = max(outcomes.items(), key=lambda kv: len(kv[1]))
+    perfect_outcomes: set[str] = set()
+    if perfect_wallets:
+        for t in relevant_trades:
+            wallet = str(t.get("wallet") or "").lower()
+            if wallet in perfect_wallets:
+                perfect_outcomes.add(str(t.get("outcome", "")))
+
+    forced_by_perfect = len(perfect_outcomes) == 1
+    if forced_by_perfect:
+        leading_outcome = next(iter(perfect_outcomes))
+        leading_trades = outcomes.get(leading_outcome, [])
+    else:
+        leading_outcome, leading_trades = max(outcomes.items(), key=lambda kv: len(kv[1]))
     
     total_participants = len(relevant_trades)
     participants = len(leading_trades)
@@ -241,6 +257,7 @@ def compute_signal_stats_at_time(
         "mean_entry": mean_entry,
         "tight_band": tight_band,
         "signal_timestamp": cutoff_timestamp,
+        "forced_by_perfect": forced_by_perfect,
     }
 
 
@@ -248,6 +265,8 @@ def compute_signal_at_time(
     trades: list[dict[str, Any]],
     cutoff_timestamp: int,
     config: BacktestConfig,
+    *,
+    perfect_wallets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """
     Compute signal for a market using only trades up to cutoff_timestamp.
@@ -255,11 +274,20 @@ def compute_signal_at_time(
     
     Returns signal dict if it passes configured filters, None otherwise.
     """
-    signal = compute_signal_stats_at_time(trades, cutoff_timestamp)
+    signal = compute_signal_stats_at_time(
+        trades,
+        cutoff_timestamp,
+        perfect_wallets=perfect_wallets,
+    )
     if not signal:
         return None
 
-    if signal["total_participants"] < config.min_total_participants:
+    forced_by_perfect = bool(signal.get("forced_by_perfect")) and config.allow_single_perfect
+
+    if not forced_by_perfect and signal["total_participants"] < config.min_total_participants:
+        return None
+
+    if not forced_by_perfect and signal["participants"] < 2:
         return None
 
     if config.require_tight_band and not signal["tight_band"]:
@@ -420,6 +448,14 @@ async def run_backtest(
         
         # Read trades and immediately release the connection
         all_trades = db.get_trades_in_timerange(conn, start_ts=lookback_start)
+
+        perf_map = db.get_wallet_performance_map(conn)
+        perfect_wallets = {
+            wallet
+            for wallet, stats in perf_map.items()
+            if stats.get("win_rate", 0.0) >= config.perfect_accuracy
+            and stats.get("resolved_trades", 0) >= config.min_perfect_resolved_trades
+        }
         
         if not all_trades:
             # No trades in period - do a quick write
@@ -515,7 +551,12 @@ async def run_backtest(
             signal_ts = buy_trades[config.min_participants - 1].get("timestamp") or 0
             
             # Compute signal at that point in time
-            signal = compute_signal_at_time(sorted_trades, signal_ts, config)
+            signal = compute_signal_at_time(
+                sorted_trades,
+                signal_ts,
+                config,
+                perfect_wallets=perfect_wallets,
+            )
             
             if not signal:
                 continue

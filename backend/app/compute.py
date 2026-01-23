@@ -176,6 +176,13 @@ async def compute_and_store(
     
     # Get accuracy map for weighting
     accuracy_map = db.get_wallet_accuracy_map(conn)
+    perf_map = db.get_wallet_performance_map(conn)
+    perfect_wallets = {
+        wallet
+        for wallet, stats in perf_map.items()
+        if stats.get("win_rate", 0.0) >= 1.0
+        and stats.get("resolved_trades", 0) >= 20
+    }
 
     latest_buy: dict[tuple[str, str], dict[str, Any]] = {}
     for r in buy_rows:
@@ -225,7 +232,18 @@ async def compute_and_store(
         if is_sports_market(event_slug=event_slug, slug=slug, title=title):
             continue
 
-        leading_outcome, leading_recs = max(outcomes.items(), key=lambda kv: len(kv[1]))
+        perfect_outcomes = {
+            str(rec.get("outcome"))
+            for rec in recs
+            if str(rec.get("wallet")).lower() in perfect_wallets
+        }
+        forced_by_perfect = len(perfect_outcomes) == 1
+
+        if forced_by_perfect:
+            leading_outcome = next(iter(perfect_outcomes))
+            leading_recs = outcomes.get(leading_outcome, [])
+        else:
+            leading_outcome, leading_recs = max(outcomes.items(), key=lambda kv: len(kv[1]))
         total_participants = len(recs)
         participants = len(leading_recs)
         consensus_percent = (participants / total_participants) if total_participants else 0.0
@@ -266,6 +284,7 @@ async def compute_and_store(
                 "price_unavailable": True,
                 "ready": False,
                 "confidence_score": 0.0,
+                "forced_by_perfect": bool(forced_by_perfect),
                 "end_date": None,
                 "is_closed": False,
                 "is_active": True,
@@ -309,6 +328,7 @@ async def compute_and_store(
     await asyncio.gather(*[_fetch(a) for a in unique_assets])
 
     for r in market_rows:
+        forced_by_perfect = bool(r.get("forced_by_perfect"))
         asset_id = condition_to_asset.get(r["condition_id"])
         midpoint = asset_to_midpoint.get(asset_id) if asset_id else None
         r["midpoint"] = midpoint
@@ -332,10 +352,11 @@ async def compute_and_store(
         consensus_ok = float(r["consensus_percent"]) >= 0.45
         # Optimized readiness filter from backtest sweep.
         r["ready"] = (
-            int(r["total_participants"]) >= 2
+            (forced_by_perfect or int(r["total_participants"]) >= 2)
             and float(r["confidence_score"]) >= 0.20
             and entry_ok
             and consensus_ok
+            and (forced_by_perfect or int(r["participants"]) >= 2)
         )
 
     db.replace_market_state(conn, market_rows)

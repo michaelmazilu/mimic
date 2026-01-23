@@ -1058,6 +1058,23 @@ def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
     }
 
 
+def get_wallet_performance_map(conn: sqlite3.Connection) -> dict[str, dict[str, float | int]]:
+    """Get a mapping of wallet -> performance stats used for eligibility checks."""
+    rows = conn.execute(
+        """
+        SELECT wallet, win_rate, won_trades, lost_trades
+        FROM wallet_stats
+        """
+    ).fetchall()
+    return {
+        r["wallet"]: {
+            "win_rate": float(r["win_rate"] or 0.0),
+            "resolved_trades": int((r["won_trades"] or 0) + (r["lost_trades"] or 0)),
+        }
+        for r in rows
+    }
+
+
 # ============================================================================
 # Market Resolutions Functions
 # ============================================================================
