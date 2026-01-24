@@ -10,6 +10,7 @@ import asyncio
 import sqlite3
 import time
 import uuid
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from typing import Any
@@ -116,9 +117,90 @@ def _safe_float(x: Any) -> float | None:
         return None
 
 
-def calculate_bet_size(confidence: float, config: BacktestConfig) -> float:
+def _fit_isotonic(samples: list[tuple[float, int]]) -> list[tuple[float, float, float]]:
+    """Fit an isotonic regression model using the pool-adjacent-violators algorithm."""
+    if not samples:
+        return []
+    samples = sorted(samples, key=lambda item: item[0])
+
+    xs: list[float] = []
+    ys: list[float] = []
+    ws: list[int] = []
+    for score, outcome in samples:
+        if xs and score == xs[-1]:
+            total = ws[-1] + 1
+            ys[-1] = (ys[-1] * ws[-1] + outcome) / total
+            ws[-1] = total
+        else:
+            xs.append(score)
+            ys.append(float(outcome))
+            ws.append(1)
+
+    blocks: list[list[float]] = []
+    for idx, (avg, weight) in enumerate(zip(ys, ws, strict=False)):
+        blocks.append([float(idx), float(idx), avg, float(weight)])
+
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i][2] > blocks[i + 1][2]:
+            total_weight = blocks[i][3] + blocks[i + 1][3]
+            merged_avg = (blocks[i][2] * blocks[i][3] + blocks[i + 1][2] * blocks[i + 1][3]) / total_weight
+            blocks[i][1] = blocks[i + 1][1]
+            blocks[i][2] = merged_avg
+            blocks[i][3] = total_weight
+            del blocks[i + 1]
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+
+    segments: list[tuple[float, float, float]] = []
+    for start, end, avg, _weight in blocks:
+        start_idx = int(start)
+        end_idx = int(end)
+        segments.append((xs[start_idx], xs[end_idx], avg))
+    return segments
+
+
+class IsotonicCalibrator:
+    def __init__(self, *, min_samples: int = 50, min_unique_scores: int = 8) -> None:
+        self.min_samples = min_samples
+        self.min_unique_scores = min_unique_scores
+        self._samples: list[tuple[float, int]] = []
+        self._segments: list[tuple[float, float, float]] = []
+        self._segment_max: list[float] = []
+
+    def add(self, score: float, outcome: bool) -> None:
+        score = float(score)
+        score = max(0.0, min(1.0, score))
+        self._samples.append((score, 1 if outcome else 0))
+        if not self._ready_to_fit():
+            return
+        self._segments = _fit_isotonic(self._samples)
+        self._segment_max = [seg[1] for seg in self._segments]
+
+    def predict(self, score: float) -> float:
+        score = float(score)
+        score = max(0.0, min(1.0, score))
+        if not self._segments:
+            return score
+        idx = bisect_left(self._segment_max, score)
+        if idx <= 0:
+            return self._segments[0][2]
+        if idx >= len(self._segments):
+            return self._segments[-1][2]
+        return self._segments[idx][2]
+
+    def _ready_to_fit(self) -> bool:
+        if len(self._samples) < self.min_samples:
+            return False
+        unique_scores = {s for s, _ in self._samples}
+        return len(unique_scores) >= self.min_unique_scores
+
+
+def calculate_bet_size(probability: float, config: BacktestConfig) -> float:
     """
-    Calculate bet size based on confidence and config.
+    Calculate bet size based on calibrated probability and config.
     
     For scaled sizing:
     - Scale from base_bet at 50% confidence to max_bet at 100%
@@ -128,14 +210,14 @@ def calculate_bet_size(confidence: float, config: BacktestConfig) -> float:
         return config.base_bet
     elif config.bet_sizing == "scaled":
         # Scale from 0 at 50% to 1 at 100%
-        edge = max(0, (confidence - 0.5) * 2)
+        edge = max(0.0, (probability - 0.5) * 2)
         return config.base_bet + (config.max_bet - config.base_bet) * edge
     elif config.bet_sizing == "kelly":
         # Kelly criterion: f* = (bp - q) / b
         # Where b = odds, p = win probability, q = 1 - p
         # Simplified: use confidence as win probability estimate
         # Cap at 25% of max bet for safety
-        kelly_fraction = confidence - (1 - confidence)  # Expected edge
+        kelly_fraction = probability - (1 - probability)  # Expected edge
         kelly_bet = config.max_bet * max(0, min(0.25, kelly_fraction))
         return max(config.base_bet, kelly_bet)
     else:
@@ -306,6 +388,7 @@ def compute_signal_stats_at_time(
         "confidence_score": confidence_score,
         "consensus_percent": consensus_percent,
         "weighted_consensus_percent": weighted_consensus,
+        "raw_probability": weighted_consensus,
         "participants": participants,
         "total_participants": total_participants,
         "weighted_participants": weighted_participants,
@@ -362,11 +445,7 @@ def compute_signal_at_time(
     if not forced_by_perfect and signal["weighted_participants"] < config.min_weighted_participants:
         return None
 
-    p = float(signal["weighted_consensus_percent"])
-    ev = p * (1 / mean_entry - 1) - (1 - p)
-    if ev < config.ev_min:
-        return None
-
+    # EV gating is applied after calibration in the backtest loop.
     if signal["confidence_score"] < config.min_confidence:
         return None
 
@@ -577,9 +656,9 @@ async def run_backtest(
             batch = condition_ids[i:i + batch_size]
             await asyncio.gather(*[fetch_market_resolution(cid) for cid in batch])
         
-        # Step 3: Generate signals for each market
-        backtest_trades: list[BacktestTrade] = []
-        
+        # Step 3: Generate candidate signals for each market (EV gating after calibration)
+        candidate_signals: list[dict[str, Any]] = []
+
         for condition_id, trades in trades_by_condition.items():
             # Only process markets we have resolution data for
             if condition_id not in resolutions:
@@ -627,33 +706,71 @@ async def run_backtest(
             
             if not signal:
                 continue
-            
-            # Create simulated trade
-            predicted_outcome = signal["leading_outcome"]
+
             actual_outcome = resolutions[condition_id]
+            predicted_outcome = signal["leading_outcome"]
             won = predicted_outcome == actual_outcome
             entry_price = signal.get("mean_entry")
-            
-            if config.bet_sizing == "bankroll":
-                bet_size = 0.0
-                pnl = 0.0
-            else:
-                bet_size = calculate_bet_size(signal["confidence_score"], config)
-                pnl = calculate_pnl(bet_size, entry_price, won)
-            
-            trade = BacktestTrade(
-                condition_id=condition_id,
-                title=signal.get("title"),
-                signal_timestamp=signal_ts,
-                predicted_outcome=predicted_outcome,
-                confidence_score=signal["confidence_score"],
-                bet_size=bet_size,
-                entry_price=entry_price,
-                actual_outcome=actual_outcome,
-                pnl=pnl,
-                won=won,
+
+            candidate_signals.append(
+                {
+                    "condition_id": condition_id,
+                    "title": signal.get("title"),
+                    "signal_timestamp": signal_ts,
+                    "predicted_outcome": predicted_outcome,
+                    "confidence_score": signal["confidence_score"],
+                    "entry_price": entry_price,
+                    "raw_probability": signal.get("raw_probability", signal["weighted_consensus_percent"]),
+                    "actual_outcome": actual_outcome,
+                    "won": won,
+                }
             )
-            backtest_trades.append(trade)
+
+        candidate_signals.sort(key=lambda s: s["signal_timestamp"])
+        calibrator = IsotonicCalibrator()
+        backtest_trades: list[BacktestTrade] = []
+
+        idx = 0
+        while idx < len(candidate_signals):
+            batch_ts = candidate_signals[idx]["signal_timestamp"]
+            batch: list[dict[str, Any]] = []
+            while idx < len(candidate_signals) and candidate_signals[idx]["signal_timestamp"] == batch_ts:
+                batch.append(candidate_signals[idx])
+                idx += 1
+
+            for signal in batch:
+                raw_probability = float(signal["raw_probability"])
+                calibrated_probability = calibrator.predict(raw_probability)
+                entry_price = signal["entry_price"]
+                if entry_price is None or entry_price <= 0:
+                    continue
+                ev = calibrated_probability * (1 / entry_price - 1) - (1 - calibrated_probability)
+                if ev < config.ev_min:
+                    continue
+
+                if config.bet_sizing == "bankroll":
+                    bet_size = 0.0
+                    pnl = 0.0
+                else:
+                    bet_size = calculate_bet_size(calibrated_probability, config)
+                    pnl = calculate_pnl(bet_size, entry_price, signal["won"])
+
+                trade = BacktestTrade(
+                    condition_id=signal["condition_id"],
+                    title=signal["title"],
+                    signal_timestamp=signal["signal_timestamp"],
+                    predicted_outcome=signal["predicted_outcome"],
+                    confidence_score=signal["confidence_score"],
+                    bet_size=bet_size,
+                    entry_price=entry_price,
+                    actual_outcome=signal["actual_outcome"],
+                    pnl=pnl,
+                    won=signal["won"],
+                )
+                backtest_trades.append(trade)
+
+            for signal in batch:
+                calibrator.add(float(signal["raw_probability"]), bool(signal["won"]))
         
         # Step 4: Aggregate results
         if config.bet_sizing == "bankroll":

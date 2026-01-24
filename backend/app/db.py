@@ -1054,18 +1054,65 @@ def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
         margin = z * ((phat * (1 - phat) + z2 / (4 * total)) / total) ** 0.5
         return max(0.0, (center - margin) / denom)
 
+    def _stability_penalty(
+        win_rate: float,
+        recent_accuracy: float,
+        recent_trades: int,
+        *,
+        min_trades: int,
+    ) -> float:
+        if recent_trades < min_trades or win_rate <= 0:
+            return 1.0
+        ratio = recent_accuracy / win_rate
+        ratio = min(1.0, max(0.0, ratio))
+        return 0.5 + 0.5 * ratio
+
     rows = conn.execute(
         """
-        SELECT wallet, won_trades, lost_trades
+        SELECT wallet,
+               won_trades,
+               lost_trades,
+               recent_accuracy_7d,
+               recent_trades_7d,
+               recent_accuracy_30d,
+               recent_trades_30d
         FROM wallet_stats
         WHERE (won_trades + lost_trades) >= 10
         """
     ).fetchall()
-    
-    return {
-        r["wallet"]: _wilson_lower_bound(int(r["won_trades"] or 0), int((r["won_trades"] or 0) + (r["lost_trades"] or 0)))
-        for r in rows
-    }
+
+    weights: dict[str, float] = {}
+    for r in rows:
+        wins = int(r["won_trades"] or 0)
+        losses = int(r["lost_trades"] or 0)
+        total = wins + losses
+        if total <= 0:
+            continue
+        win_rate = wins / total
+        base = _wilson_lower_bound(wins, total)
+
+        penalties: list[float] = []
+        p7 = _stability_penalty(
+            win_rate,
+            float(r["recent_accuracy_7d"] or 0.0),
+            int(r["recent_trades_7d"] or 0),
+            min_trades=5,
+        )
+        if int(r["recent_trades_7d"] or 0) >= 5:
+            penalties.append(p7)
+        p30 = _stability_penalty(
+            win_rate,
+            float(r["recent_accuracy_30d"] or 0.0),
+            int(r["recent_trades_30d"] or 0),
+            min_trades=10,
+        )
+        if int(r["recent_trades_30d"] or 0) >= 10:
+            penalties.append(p30)
+
+        penalty = min(penalties) if penalties else 1.0
+        weights[r["wallet"]] = base * penalty
+
+    return weights
 
 
 def get_wallet_performance_map(conn: sqlite3.Connection) -> dict[str, dict[str, float | int]]:
