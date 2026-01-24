@@ -68,9 +68,11 @@ export async function runBacktest(
 ): Promise<BacktestRunResponse> {
   const body = config ? {
     minConfidence: config.minConfidence ?? 0.80,
-    betSizing: config.betSizing ?? "scaled",
+    betSizing: config.betSizing ?? "bankroll",
     baseBet: config.baseBet ?? 100.0,
     maxBet: config.maxBet ?? 500.0,
+    startingBankroll: config.startingBankroll ?? 200.0,
+    betFraction: config.betFraction ?? 0.02,
     lookbackDays: config.lookbackDays ?? 180,
     minParticipants: config.minParticipants ?? 2,
   } : null;
@@ -95,4 +97,3 @@ export async function getLatestBacktest(
     return null;
   }
 }
-

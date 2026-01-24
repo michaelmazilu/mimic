@@ -111,6 +111,8 @@ export type BacktestConfig = {
   betSizing: string;
   baseBet: number;
   maxBet: number;
+  startingBankroll: number;
+  betFraction: number;
   lookbackDays: number;
   minParticipants: number;
 };
@@ -153,4 +155,3 @@ export type BacktestRunResponse = {
   trades: BacktestTrade[];
   equityCurve: EquityCurvePoint[];
 };
-

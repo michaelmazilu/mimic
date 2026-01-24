@@ -35,17 +35,22 @@ class SignalRecord:
     actual_outcome: str
     confidence_score: float
     consensus_percent: float
+    weighted_consensus_percent: float
     total_participants: int
     participants: int
+    weighted_participants: float
     mean_entry: float
     tight_band: bool
+    forced_by_perfect: bool
     won: bool
 
 
 @dataclass(frozen=True)
 class Candidate:
     min_confidence: float
-    consensus_min: float
+    weighted_consensus_min: float
+    min_weighted_participants: float
+    ev_min: float
     entry_min: float
     entry_max: float
     require_tight_band: bool
@@ -54,7 +59,9 @@ class Candidate:
     def key(self) -> tuple[Any, ...]:
         return (
             self.min_confidence,
-            self.consensus_min,
+            self.weighted_consensus_min,
+            self.min_weighted_participants,
+            self.ev_min,
             self.entry_min,
             self.entry_max,
             self.require_tight_band,
@@ -86,13 +93,24 @@ def _month_ranges(start_ts: int, end_ts: int) -> list[tuple[int, int]]:
 
 
 def _passes_filter(record: SignalRecord, cand: Candidate) -> bool:
-    if record.total_participants < cand.min_total_participants:
+    if not record.forced_by_perfect and record.total_participants < cand.min_total_participants:
+        return False
+    if not record.forced_by_perfect and record.participants < 2:
         return False
     if cand.require_tight_band and not record.tight_band:
         return False
     if record.mean_entry < cand.entry_min or record.mean_entry >= cand.entry_max:
         return False
-    if record.consensus_percent < cand.consensus_min:
+    if record.weighted_consensus_percent < cand.weighted_consensus_min:
+        return False
+    if not record.forced_by_perfect and record.weighted_participants < cand.min_weighted_participants:
+        return False
+    if record.mean_entry <= 0:
+        return False
+    ev = record.weighted_consensus_percent * (1 / record.mean_entry - 1) - (
+        1 - record.weighted_consensus_percent
+    )
+    if ev < cand.ev_min:
         return False
     if record.confidence_score < cand.min_confidence:
         return False
@@ -123,36 +141,43 @@ def _compute_metrics(records: list[SignalRecord], cand: Candidate | None) -> dic
 def _build_candidates() -> list[Candidate]:
     candidates: list[Candidate] = []
     min_confidence = [0.2, 0.3, 0.4, 0.5]
-    consensus_min = [0.55, 0.60, 0.65]
-    entry_mins = [0.25, 0.30, 0.35]
-    entry_maxs = [0.55, 0.60, 0.65]
+    weighted_consensus_min = [0.55, 0.60, 0.65]
+    min_weighted_participants = [1.0, 1.5, 2.0]
+    ev_min = [0.0, 0.02, 0.03]
+    entry_mins = [0.30, 0.35]
+    entry_maxs = [0.60, 0.65]
     require_tight_band = [True, False]
-    min_total_participants = [3, 4]
+    min_total_participants = [2, 3]
 
     for mc in min_confidence:
-        for cm in consensus_min:
-            for emin in entry_mins:
-                for emax in entry_maxs:
-                    if emin >= emax:
-                        continue
-                    for tb in require_tight_band:
-                        for mtp in min_total_participants:
-                            candidates.append(
-                                Candidate(
-                                    min_confidence=mc,
-                                    consensus_min=cm,
-                                    entry_min=emin,
-                                    entry_max=emax,
-                                    require_tight_band=tb,
-                                    min_total_participants=mtp,
-                                )
-                            )
+        for wcm in weighted_consensus_min:
+            for mwp in min_weighted_participants:
+                for ev in ev_min:
+                    for emin in entry_mins:
+                        for emax in entry_maxs:
+                            if emin >= emax:
+                                continue
+                            for tb in require_tight_band:
+                                for mtp in min_total_participants:
+                                    candidates.append(
+                                        Candidate(
+                                            min_confidence=mc,
+                                            weighted_consensus_min=wcm,
+                                            min_weighted_participants=mwp,
+                                            ev_min=ev,
+                                            entry_min=emin,
+                                            entry_max=emax,
+                                            require_tight_band=tb,
+                                            min_total_participants=mtp,
+                                        )
+                                    )
     return candidates
 
 
 def _format_candidate(cand: Candidate) -> str:
     return (
-        f"min_conf={cand.min_confidence:.2f}, consensus>={cand.consensus_min:.2f}, "
+        f"min_conf={cand.min_confidence:.2f}, weighted_consensus>={cand.weighted_consensus_min:.2f}, "
+        f"weighted_support>={cand.min_weighted_participants:.2f}, ev>={cand.ev_min:.2f}, "
         f"entry=[{cand.entry_min:.2f},{cand.entry_max:.2f}), "
         f"tight_band={cand.require_tight_band}, min_participants={cand.min_total_participants}"
     )
@@ -207,7 +232,28 @@ def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
     return band_min, band_max, mean, stddev
 
 
+def _compute_weighted_majority(
+    recs: list[dict[str, Any]],
+    accuracy_map: dict[str, float],
+    default_weight: float = 0.5,
+) -> tuple[str | None, float, float, float, dict[str, float]]:
+    totals: dict[str, float] = defaultdict(float)
+    total_weight = 0.0
+    for rec in recs:
+        wallet = str(rec.get("wallet") or "").lower()
+        accuracy = accuracy_map.get(wallet, default_weight)
+        weight = max(accuracy, 0.1)
+        total_weight += weight
+        totals[str(rec.get("outcome", ""))] += weight
+    if not totals:
+        return None, 0.0, 0.0, 0.0, totals
+    leading_outcome, leading_weight = max(totals.items(), key=lambda kv: kv[1])
+    weighted_consensus = leading_weight / total_weight if total_weight else 0.0
+    return leading_outcome, weighted_consensus, leading_weight, total_weight, totals
+
+
 def _compute_confidence_score(
+    weighted_consensus: float,
     consensus_percent: float,
     tight_band: bool,
     participants: int,
@@ -226,7 +272,7 @@ def _compute_confidence_score(
     else:
         max_score = 0.85
 
-    weighted_score = consensus_percent * 35
+    weighted_score = weighted_consensus * 35
     raw_score = consensus_percent * 20
     tight_score = 15 if tight_band else 0
     cooked_score = 15
@@ -240,6 +286,9 @@ def _compute_confidence_score(
 def compute_signal_stats_at_time(
     trades: list[dict[str, Any]],
     cutoff_timestamp: int,
+    *,
+    accuracy_map: dict[str, float] | None = None,
+    perfect_wallets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     relevant_trades = [
         t for t in trades
@@ -259,7 +308,35 @@ def compute_signal_stats_at_time(
     if not outcomes:
         return None
 
-    leading_outcome, leading_trades = max(outcomes.items(), key=lambda kv: len(kv[1]))
+    accuracy_map = accuracy_map or {}
+    (
+        weighted_outcome,
+        weighted_consensus,
+        weighted_participants,
+        total_weight,
+        weight_totals,
+    ) = _compute_weighted_majority(relevant_trades, accuracy_map)
+    if not weighted_outcome:
+        return None
+
+    perfect_outcomes: set[str] = set()
+    if perfect_wallets:
+        for t in relevant_trades:
+            wallet = str(t.get("wallet") or "").lower()
+            if wallet in perfect_wallets:
+                perfect_outcomes.add(str(t.get("outcome", "")))
+
+    forced_by_perfect = len(perfect_outcomes) == 1
+    if forced_by_perfect:
+        leading_outcome = next(iter(perfect_outcomes))
+        leading_trades = outcomes.get(leading_outcome, [])
+        leading_weight = weight_totals.get(leading_outcome, 0.0)
+        weighted_participants = leading_weight
+        weighted_consensus = leading_weight / total_weight if total_weight else 0.0
+    else:
+        leading_outcome = weighted_outcome
+        leading_trades = outcomes.get(leading_outcome, [])
+
     total_participants = len(relevant_trades)
     participants = len(leading_trades)
     consensus_percent = participants / total_participants if total_participants else 0.0
@@ -281,6 +358,7 @@ def compute_signal_stats_at_time(
         tight_band = ((band_max - band_min) <= 0.03) or (stddev <= 0.01)
 
     confidence_score = _compute_confidence_score(
+        weighted_consensus,
         consensus_percent,
         tight_band,
         participants,
@@ -293,11 +371,14 @@ def compute_signal_stats_at_time(
         "leading_outcome": leading_outcome,
         "confidence_score": confidence_score,
         "consensus_percent": consensus_percent,
+        "weighted_consensus_percent": weighted_consensus,
         "participants": participants,
         "total_participants": total_participants,
+        "weighted_participants": weighted_participants,
         "mean_entry": mean_entry,
         "tight_band": tight_band,
         "signal_timestamp": cutoff_timestamp,
+        "forced_by_perfect": forced_by_perfect,
     }
 
 
@@ -315,6 +396,8 @@ def _build_signal_records(
     resolutions: dict[str, str],
     min_participants: int,
     exclude_sports: bool,
+    accuracy_map: dict[str, float],
+    perfect_wallets: set[str],
 ) -> list[SignalRecord]:
     trades_by_condition: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for t in trades:
@@ -350,7 +433,12 @@ def _build_signal_records(
         if len(buy_trades) < min_participants:
             continue
         signal_ts = buy_trades[min_participants - 1].get("timestamp") or 0
-        signal = compute_signal_stats_at_time(sorted_trades, signal_ts)
+        signal = compute_signal_stats_at_time(
+            sorted_trades,
+            signal_ts,
+            accuracy_map=accuracy_map,
+            perfect_wallets=perfect_wallets,
+        )
         if not signal:
             continue
         mean_entry = signal.get("mean_entry")
@@ -368,10 +456,13 @@ def _build_signal_records(
                 actual_outcome=actual,
                 confidence_score=float(signal["confidence_score"]),
                 consensus_percent=float(signal["consensus_percent"]),
+                weighted_consensus_percent=float(signal["weighted_consensus_percent"]),
                 total_participants=int(signal["total_participants"]),
                 participants=int(signal["participants"]),
+                weighted_participants=float(signal["weighted_participants"]),
                 mean_entry=float(mean_entry),
                 tight_band=bool(signal["tight_band"]),
+                forced_by_perfect=bool(signal.get("forced_by_perfect")),
                 won=bool(won),
             )
         )
@@ -396,6 +487,9 @@ def main() -> int:
     parser.add_argument("--min-trades-train", type=int, default=30)
     parser.add_argument("--min-trades-val", type=int, default=10)
     parser.add_argument("--min-trades-test", type=int, default=10)
+    parser.add_argument("--min-trades-constraint", type=int, default=20)
+    parser.add_argument("--min-win-rate", type=float, default=0.70)
+    parser.add_argument("--min-roi", type=float, default=0.0)
     parser.add_argument("--max-std", type=float, default=0.05)
     parser.add_argument("--min-splits", type=int, default=2)
     parser.add_argument("--include-sports", action="store_true")
@@ -412,6 +506,14 @@ def main() -> int:
             return 1
 
         cached_resolutions = db.get_all_resolutions(conn)
+        accuracy_map = db.get_wallet_accuracy_map(conn)
+        perf_map = db.get_wallet_performance_map(conn)
+        perfect_wallets = {
+            wallet
+            for wallet, stats in perf_map.items()
+            if stats.get("win_rate", 0.0) >= 1.0
+            and stats.get("resolved_trades", 0) >= 20
+        }
 
     condition_ids = sorted({t.get("condition_id") for t in trades if t.get("condition_id")})
     if not condition_ids:
@@ -441,6 +543,8 @@ def main() -> int:
         resolutions=resolutions,
         min_participants=args.min_participants,
         exclude_sports=not args.include_sports,
+        accuracy_map=accuracy_map,
+        perfect_wallets=perfect_wallets,
     )
     if not records:
         print("No resolved signals found after filtering.")
@@ -492,12 +596,25 @@ def main() -> int:
                 continue
 
             key = cand.key()
-            aggregate.setdefault(key, {"train_win": [], "val_win": [], "test_win": []})
+            aggregate.setdefault(
+                key,
+                {
+                    "train_win": [],
+                    "val_win": [],
+                    "test_win": [],
+                    "train_roi": [],
+                    "val_roi": [],
+                    "test_roi": [],
+                },
+            )
             aggregate_trades.setdefault(key, {"train": [], "val": [], "test": []})
 
             aggregate[key]["train_win"].append(train_metrics["win_rate"])
             aggregate[key]["val_win"].append(val_metrics["win_rate"])
             aggregate[key]["test_win"].append(test_metrics["win_rate"])
+            aggregate[key]["train_roi"].append(train_metrics["roi"])
+            aggregate[key]["val_roi"].append(val_metrics["roi"])
+            aggregate[key]["test_roi"].append(test_metrics["roi"])
             aggregate_trades[key]["train"].append(int(train_metrics["trades"]))
             aggregate_trades[key]["val"].append(int(val_metrics["trades"]))
             aggregate_trades[key]["test"].append(int(test_metrics["trades"]))
@@ -513,12 +630,21 @@ def main() -> int:
         avg_train = statistics.mean(aggregate[key]["train_win"])
         avg_val = statistics.mean(aggregate[key]["val_win"])
         avg_test = statistics.mean(aggregate[key]["test_win"])
+        avg_train_roi = statistics.mean(aggregate[key]["train_roi"])
+        avg_val_roi = statistics.mean(aggregate[key]["val_roi"])
+        avg_test_roi = statistics.mean(aggregate[key]["test_roi"])
         std_test = statistics.pstdev(aggregate[key]["test_win"])
 
         avg_test_trades = statistics.mean(aggregate_trades[key]["test"])
         if std_test > args.max_std:
             continue
         if abs(avg_train - avg_val) > args.max_std:
+            continue
+        if avg_test < args.min_win_rate:
+            continue
+        if avg_test_roi < args.min_roi:
+            continue
+        if avg_test_trades < args.min_trades_constraint:
             continue
         scored.append(
             (
@@ -528,6 +654,9 @@ def main() -> int:
                     "avg_train": avg_train,
                     "avg_val": avg_val,
                     "avg_test": avg_test,
+                    "avg_train_roi": avg_train_roi,
+                    "avg_val_roi": avg_val_roi,
+                    "avg_test_roi": avg_test_roi,
                     "std_test": std_test,
                     "avg_test_trades": avg_test_trades,
                 },
@@ -548,7 +677,8 @@ def main() -> int:
         print(
             f"  {_format_candidate(cand)} | splits={metrics['splits']} "
             f"train={metrics['avg_train']:.3f} val={metrics['avg_val']:.3f} "
-            f"test={metrics['avg_test']:.3f} std={metrics['std_test']:.3f} "
+            f"test={metrics['avg_test']:.3f} "
+            f"test_roi={metrics['avg_test_roi']:.3f} std={metrics['std_test']:.3f} "
             f"avg_test_trades={metrics['avg_test_trades']:.1f}"
         )
 

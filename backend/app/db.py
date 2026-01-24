@@ -1043,17 +1043,27 @@ def bulk_upsert_wallet_stats(conn: sqlite3.Connection, stats: list[dict[str, Any
 
 
 def get_wallet_accuracy_map(conn: sqlite3.Connection) -> dict[str, float]:
-    """Get a mapping of wallet -> recent_accuracy_7d for weighting consensus."""
+    """Get a mapping of wallet -> reliability-adjusted accuracy for weighting consensus."""
+    def _wilson_lower_bound(wins: int, total: int, *, z: float = 1.96) -> float:
+        if total <= 0:
+            return 0.0
+        phat = wins / total
+        z2 = z * z
+        denom = 1 + z2 / total
+        center = phat + z2 / (2 * total)
+        margin = z * ((phat * (1 - phat) + z2 / (4 * total)) / total) ** 0.5
+        return max(0.0, (center - margin) / denom)
+
     rows = conn.execute(
         """
-        SELECT wallet, recent_accuracy_7d, recent_trades_7d
+        SELECT wallet, won_trades, lost_trades
         FROM wallet_stats
-        WHERE recent_trades_7d >= 3
+        WHERE (won_trades + lost_trades) >= 10
         """
     ).fetchall()
     
     return {
-        r["wallet"]: r["recent_accuracy_7d"]
+        r["wallet"]: _wilson_lower_bound(int(r["won_trades"] or 0), int((r["won_trades"] or 0) + (r["lost_trades"] or 0)))
         for r in rows
     }
 

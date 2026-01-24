@@ -41,10 +41,12 @@ export function BacktestPanel({ initialResult }: Props) {
 
   // Config state
   const [config, setConfig] = useState<BacktestConfig>({
-    minConfidence: 0.80,
-    betSizing: "scaled",
+    minConfidence: 0.0,
+    betSizing: "bankroll",
     baseBet: 100,
     maxBet: 500,
+    startingBankroll: 200,
+    betFraction: 0.02,
     lookbackDays: 180,
     minParticipants: 2,
   });
@@ -82,6 +84,8 @@ export function BacktestPanel({ initialResult }: Props) {
               value={config.minConfidence}
               onChange={(e) => setConfig({ ...config, minConfidence: parseFloat(e.target.value) })}
             >
+              <option value={0}>0%</option>
+              <option value={0.2}>20%</option>
               <option value={0.60}>60%</option>
               <option value={0.70}>70%</option>
               <option value={0.80}>80%</option>
@@ -98,7 +102,33 @@ export function BacktestPanel({ initialResult }: Props) {
               <option value="flat">Flat ($100)</option>
               <option value="scaled">Scaled by Confidence</option>
               <option value="kelly">Kelly Criterion</option>
+              <option value="bankroll">Bankroll Fraction</option>
             </select>
+          </div>
+          <div>
+            <label className="label">Starting Bankroll</label>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={config.startingBankroll}
+              onChange={(e) =>
+                setConfig({ ...config, startingBankroll: parseFloat(e.target.value) || 0 })
+              }
+            />
+          </div>
+          <div>
+            <label className="label">Bet Fraction</label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={0.005}
+              value={config.betFraction}
+              onChange={(e) =>
+                setConfig({ ...config, betFraction: parseFloat(e.target.value) || 0 })
+              }
+            />
           </div>
           <div>
             <label className="label">Lookback Days</label>

@@ -134,11 +134,11 @@ class WalletsListResponse(BaseModel):
 
 class BacktestConfigModel(BaseModel):
     """Configuration for a backtest run."""
-    minConfidence: float = 0.80
-    betSizing: str = "scaled"  # flat, kelly, scaled
+    minConfidence: float = 0.0
+    betSizing: str = "bankroll"  # flat, kelly, scaled, bankroll
     baseBet: float = 100.0
     maxBet: float = 500.0
-    startingBankroll: float = 100.0
+    startingBankroll: float = 200.0
     betFraction: float = 0.02
     lookbackDays: int = 180
     minParticipants: int = 2

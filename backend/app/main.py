@@ -566,11 +566,11 @@ async def run_backtest_endpoint(
     """
     # Build config from request or use defaults
     bt_config = backtest.BacktestConfig(
-        min_confidence=config.minConfidence if config else 0.80,
-        bet_sizing=config.betSizing if config else "scaled",
+        min_confidence=config.minConfidence if config else 0.0,
+        bet_sizing=config.betSizing if config else "bankroll",
         base_bet=config.baseBet if config else 100.0,
         max_bet=config.maxBet if config else 500.0,
-        starting_bankroll=config.startingBankroll if config else 100.0,
+        starting_bankroll=config.startingBankroll if config else 200.0,
         bet_fraction=config.betFraction if config else 0.02,
         lookback_days=config.lookbackDays if config else 180,
         min_participants=config.minParticipants if config else 2,
@@ -653,7 +653,7 @@ async def get_backtest_run(run_id: str) -> BacktestRunResponse:
         runId=run["run_id"],
         status=run.get("status", "unknown"),
         config=BacktestConfigModel(
-            minConfidence=config_dict.get("min_confidence", 0.80),
+            minConfidence=config_dict.get("min_confidence", 0.0),
             betSizing=config_dict.get("bet_sizing", "scaled"),
             baseBet=config_dict.get("base_bet", 100.0),
             maxBet=config_dict.get("max_bet", 500.0),
@@ -718,7 +718,7 @@ async def get_latest_backtest() -> BacktestRunResponse | None:
         runId=run["run_id"],
         status=run.get("status", "unknown"),
         config=BacktestConfigModel(
-            minConfidence=config_dict.get("min_confidence", 0.80),
+            minConfidence=config_dict.get("min_confidence", 0.0),
             betSizing=config_dict.get("bet_sizing", "scaled"),
             baseBet=config_dict.get("base_bet", 100.0),
             maxBet=config_dict.get("max_bet", 500.0),

@@ -25,22 +25,25 @@ from .market_filters import is_sports_market
 @dataclass
 class BacktestConfig:
     """Configuration for a backtest run."""
-    min_confidence: float = 0.80
-    bet_sizing: str = "scaled"  # flat, kelly, scaled
+    min_confidence: float = 0.0
+    bet_sizing: str = "bankroll"  # flat, kelly, scaled, bankroll
     base_bet: float = 100.0
     max_bet: float = 500.0
-    starting_bankroll: float = 100.0
+    starting_bankroll: float = 200.0
     bet_fraction: float = 0.02
+    weighted_consensus_min: float = 0.0
+    min_weighted_participants: float = 0.0
+    ev_min: float = -1.0
     allow_single_perfect: bool = True
     perfect_accuracy: float = 1.0
     min_perfect_resolved_trades: int = 20
     lookback_days: int = 180
     min_participants: int = 2  # Minimum traders for a valid signal
-    min_total_participants: int = 3
-    consensus_min: float = 0.60
-    entry_min: float = 0.30
-    entry_max: float = 0.60
-    require_tight_band: bool = True
+    min_total_participants: int = 2
+    consensus_min: float = 0.0
+    entry_min: float = 0.0
+    entry_max: float = 1.0
+    require_tight_band: bool = False
     exclude_sports: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -164,10 +167,62 @@ def _compute_band(prices: list[float]) -> tuple[float, float, float, float]:
     return band_min, band_max, mean, stddev
 
 
+def _compute_weighted_majority(
+    recs: list[dict[str, Any]],
+    accuracy_map: dict[str, float],
+    default_weight: float = 0.5,
+) -> tuple[str | None, float, float, float, dict[str, float]]:
+    totals: dict[str, float] = defaultdict(float)
+    total_weight = 0.0
+    for rec in recs:
+        wallet = str(rec.get("wallet") or "").lower()
+        accuracy = accuracy_map.get(wallet, default_weight)
+        weight = max(accuracy, 0.1)
+        total_weight += weight
+        totals[str(rec.get("outcome", ""))] += weight
+    if not totals:
+        return None, 0.0, 0.0, 0.0, totals
+    leading_outcome, leading_weight = max(totals.items(), key=lambda kv: kv[1])
+    weighted_consensus = leading_weight / total_weight if total_weight else 0.0
+    return leading_outcome, weighted_consensus, leading_weight, total_weight, totals
+
+
+def _compute_confidence_score(
+    weighted_consensus: float,
+    consensus_percent: float,
+    tight_band: bool,
+    participants: int,
+    total_participants: int,
+) -> float:
+    if total_participants <= 1:
+        max_score = 0.15
+    elif total_participants == 2:
+        max_score = 0.30
+    elif total_participants == 3:
+        max_score = 0.45
+    elif total_participants <= 5:
+        max_score = 0.55
+    elif total_participants <= 10:
+        max_score = 0.70
+    else:
+        max_score = 0.85
+
+    weighted_score = weighted_consensus * 35
+    raw_score = consensus_percent * 20
+    tight_score = 15 if tight_band else 0
+    cooked_score = 15
+    participant_score = min(15, np.log1p(participants) * 3)
+
+    raw_total = weighted_score + raw_score + tight_score + cooked_score + participant_score
+    raw_normalized = raw_total / 100.0
+    return min(raw_normalized, max_score)
+
+
 def compute_signal_stats_at_time(
     trades: list[dict[str, Any]],
     cutoff_timestamp: int,
     *,
+    accuracy_map: dict[str, float] | None = None,
     perfect_wallets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -193,6 +248,17 @@ def compute_signal_stats_at_time(
     
     if not outcomes:
         return None
+
+    accuracy_map = accuracy_map or {}
+    (
+        weighted_outcome,
+        weighted_consensus,
+        weighted_participants,
+        total_weight,
+        weight_totals,
+    ) = _compute_weighted_majority(relevant_trades, accuracy_map)
+    if not weighted_outcome:
+        return None
     
     perfect_outcomes: set[str] = set()
     if perfect_wallets:
@@ -205,8 +271,12 @@ def compute_signal_stats_at_time(
     if forced_by_perfect:
         leading_outcome = next(iter(perfect_outcomes))
         leading_trades = outcomes.get(leading_outcome, [])
+        leading_weight = weight_totals.get(leading_outcome, 0.0)
+        weighted_participants = leading_weight
+        weighted_consensus = leading_weight / total_weight if total_weight else 0.0
     else:
-        leading_outcome, leading_trades = max(outcomes.items(), key=lambda kv: len(kv[1]))
+        leading_outcome = weighted_outcome
+        leading_trades = outcomes.get(leading_outcome, [])
     
     total_participants = len(relevant_trades)
     participants = len(leading_trades)
@@ -221,30 +291,13 @@ def compute_signal_stats_at_time(
         band_min, band_max, mean_entry, stddev = _compute_band(prices)
         tight_band = ((band_max - band_min) <= 0.03) or (stddev <= 0.01)
 
-    # Compute confidence score with participant-based cap
-    # Cap max score based on participant count (same logic as compute.py)
-    if total_participants <= 1:
-        max_score = 0.15
-    elif total_participants == 2:
-        max_score = 0.30
-    elif total_participants == 3:
-        max_score = 0.45
-    elif total_participants <= 5:
-        max_score = 0.55
-    elif total_participants <= 10:
-        max_score = 0.70
-    else:
-        max_score = 0.85
-    
-    # Base score components
-    weighted_score = consensus_percent * 35
-    raw_score = consensus_percent * 20
-    tight_score = 15 if tight_band else 0
-    cooked_score = 15  # Assume not cooked in backtest
-    participant_score = min(15, np.log1p(participants) * 3)
-    
-    raw_total = weighted_score + raw_score + tight_score + cooked_score + participant_score
-    confidence_score = min(raw_total / 100.0, max_score)
+    confidence_score = _compute_confidence_score(
+        weighted_consensus,
+        consensus_percent,
+        tight_band,
+        participants,
+        total_participants,
+    )
     
     return {
         "condition_id": trades[0].get("condition_id"),
@@ -252,8 +305,10 @@ def compute_signal_stats_at_time(
         "leading_outcome": leading_outcome,
         "confidence_score": confidence_score,
         "consensus_percent": consensus_percent,
+        "weighted_consensus_percent": weighted_consensus,
         "participants": participants,
         "total_participants": total_participants,
+        "weighted_participants": weighted_participants,
         "mean_entry": mean_entry,
         "tight_band": tight_band,
         "signal_timestamp": cutoff_timestamp,
@@ -266,6 +321,7 @@ def compute_signal_at_time(
     cutoff_timestamp: int,
     config: BacktestConfig,
     *,
+    accuracy_map: dict[str, float] | None = None,
     perfect_wallets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -277,6 +333,7 @@ def compute_signal_at_time(
     signal = compute_signal_stats_at_time(
         trades,
         cutoff_timestamp,
+        accuracy_map=accuracy_map,
         perfect_wallets=perfect_wallets,
     )
     if not signal:
@@ -287,7 +344,7 @@ def compute_signal_at_time(
     if not forced_by_perfect and signal["total_participants"] < config.min_total_participants:
         return None
 
-    if not forced_by_perfect and signal["participants"] < 2:
+    if not forced_by_perfect and signal["participants"] < config.min_participants:
         return None
 
     if config.require_tight_band and not signal["tight_band"]:
@@ -299,7 +356,15 @@ def compute_signal_at_time(
     if mean_entry < config.entry_min or mean_entry >= config.entry_max:
         return None
 
-    if signal["consensus_percent"] < config.consensus_min:
+    if signal["weighted_consensus_percent"] < config.weighted_consensus_min:
+        return None
+
+    if not forced_by_perfect and signal["weighted_participants"] < config.min_weighted_participants:
+        return None
+
+    p = float(signal["weighted_consensus_percent"])
+    ev = p * (1 / mean_entry - 1) - (1 - p)
+    if ev < config.ev_min:
         return None
 
     if signal["confidence_score"] < config.min_confidence:
@@ -449,6 +514,7 @@ async def run_backtest(
         # Read trades and immediately release the connection
         all_trades = db.get_trades_in_timerange(conn, start_ts=lookback_start)
 
+        accuracy_map = db.get_wallet_accuracy_map(conn)
         perf_map = db.get_wallet_performance_map(conn)
         perfect_wallets = {
             wallet
@@ -555,6 +621,7 @@ async def run_backtest(
                 sorted_trades,
                 signal_ts,
                 config,
+                accuracy_map=accuracy_map,
                 perfect_wallets=perfect_wallets,
             )
             

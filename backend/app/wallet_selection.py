@@ -30,6 +30,7 @@ class WalletMetrics:
     resolved_trades: int
     wins: int
     win_rate: float
+    accuracy_lb: float
     total_pnl: float
     avg_roi: float
     recent_trades_7d: int
@@ -80,6 +81,17 @@ def _calculate_pnl(entry_price: float | None, *, won: bool) -> float:
             return 1.0 * (1 / entry_price - 1)
         return 1.0
     return -1.0
+
+
+def _wilson_lower_bound(wins: int, total: int, *, z: float = 1.96) -> float:
+    if total <= 0:
+        return 0.0
+    phat = wins / total
+    z2 = z * z
+    denom = 1 + z2 / total
+    center = phat + z2 / (2 * total)
+    margin = z * ((phat * (1 - phat) + z2 / (4 * total)) / total) ** 0.5
+    return max(0.0, (center - margin) / denom)
 
 
 def _compute_bot_metrics(
@@ -171,6 +183,7 @@ def compute_wallet_metrics(
 
         total_trades = len(buy_trades)
         win_rate = wins / resolved_trades if resolved_trades else 0.0
+        accuracy_lb = _wilson_lower_bound(wins, resolved_trades)
         avg_roi = total_pnl / resolved_trades if resolved_trades else 0.0
         recent_accuracy_7d = recent_won_7d / recent_trades_7d if recent_trades_7d else 0.0
         recent_accuracy_30d = recent_won_30d / recent_trades_30d if recent_trades_30d else 0.0
@@ -187,6 +200,7 @@ def compute_wallet_metrics(
             resolved_trades=resolved_trades,
             wins=wins,
             win_rate=win_rate,
+            accuracy_lb=accuracy_lb,
             total_pnl=total_pnl,
             avg_roi=avg_roi,
             recent_trades_7d=recent_trades_7d,
@@ -218,16 +232,16 @@ def select_wallets_by_accuracy(
     def is_eligible(m: WalletMetrics) -> bool:
         return (
             not m.is_bot
-            and m.win_rate >= config.min_accuracy
+            and m.accuracy_lb >= config.min_accuracy
             and m.sports_ratio <= config.max_sports_ratio
             and m.resolved_trades >= config.min_resolved_trades
         )
 
     def sort_key(m: WalletMetrics) -> tuple[float, int, float, int]:
         return (
-            m.win_rate,
+            m.accuracy_lb,
             m.resolved_trades,
-            m.recent_accuracy_30d,
+            m.win_rate,
             m.total_trades,
         )
 

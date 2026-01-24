@@ -101,6 +101,26 @@ def _compute_weighted_consensus(
     return weighted_consensus, leading_weight
 
 
+def _compute_weighted_majority(
+    recs: list[dict[str, Any]],
+    accuracy_map: dict[str, float],
+    default_weight: float = 0.5,
+) -> tuple[str | None, float, float, float, dict[str, float]]:
+    totals: dict[str, float] = defaultdict(float)
+    total_weight = 0.0
+    for rec in recs:
+        wallet = rec["wallet"].lower()
+        accuracy = accuracy_map.get(wallet, default_weight)
+        weight = max(accuracy, 0.1)
+        total_weight += weight
+        totals[str(rec["outcome"])] += weight
+    if not totals:
+        return None, 0.0, 0.0, 0.0, totals
+    leading_outcome, leading_weight = max(totals.items(), key=lambda kv: kv[1])
+    weighted_consensus = leading_weight / total_weight if total_weight else 0.0
+    return leading_outcome, weighted_consensus, leading_weight, total_weight, totals
+
+
 def _compute_confidence_score(
     weighted_consensus: float,
     consensus_percent: float,
@@ -232,6 +252,16 @@ async def compute_and_store(
         if is_sports_market(event_slug=event_slug, slug=slug, title=title):
             continue
 
+        (
+            weighted_outcome,
+            weighted_consensus,
+            weighted_participants,
+            total_weight,
+            weight_totals,
+        ) = _compute_weighted_majority(recs, accuracy_map)
+        if not weighted_outcome:
+            continue
+
         perfect_outcomes = {
             str(rec.get("outcome"))
             for rec in recs
@@ -241,17 +271,18 @@ async def compute_and_store(
 
         if forced_by_perfect:
             leading_outcome = next(iter(perfect_outcomes))
-            leading_recs = outcomes.get(leading_outcome, [])
+            leading_weight = weight_totals.get(leading_outcome, 0.0)
+            weighted_participants = leading_weight
+            weighted_consensus = (
+                leading_weight / total_weight if total_weight else 0.0
+            )
         else:
-            leading_outcome, leading_recs = max(outcomes.items(), key=lambda kv: len(kv[1]))
+            leading_outcome = weighted_outcome
+
+        leading_recs = outcomes.get(leading_outcome, [])
         total_participants = len(recs)
         participants = len(leading_recs)
         consensus_percent = (participants / total_participants) if total_participants else 0.0
-        
-        # Compute weighted consensus based on trader accuracy
-        weighted_consensus, weighted_participants = _compute_weighted_consensus(
-            recs, leading_outcome, accuracy_map
-        )
 
         prices = [p for p in (_safe_float(x.get("price")) for x in leading_recs) if p is not None]
         band_min = band_max = mean_entry = stddev = None
@@ -348,16 +379,10 @@ async def compute_and_store(
             r["total_participants"],
         )
         mean_entry = r.get("mean_entry")
-        entry_ok = mean_entry is not None and 0.35 <= float(mean_entry) < 0.65
-        consensus_ok = float(r["consensus_percent"]) >= 0.45
-        # Optimized readiness filter from backtest sweep.
-        r["ready"] = (
-            (forced_by_perfect or int(r["total_participants"]) >= 2)
-            and float(r["confidence_score"]) >= 0.20
-            and entry_ok
-            and consensus_ok
-            and (forced_by_perfect or int(r["participants"]) >= 2)
-        )
+        total_ok = int(r["total_participants"]) >= 2
+        lead_ok = int(r["participants"]) >= 2
+        # Baseline readiness: mirrors backtest participation checks.
+        r["ready"] = mean_entry is not None and (forced_by_perfect or (total_ok and lead_ok))
 
     db.replace_market_state(conn, market_rows)
 
