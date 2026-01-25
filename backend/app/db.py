@@ -71,6 +71,8 @@ def init_db(db_path: str) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_trades_condition_id ON trades(condition_id);
             CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades(wallet, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_trades_side_ts ON trades(side, timestamp DESC);
 
             CREATE TABLE IF NOT EXISTS computed_market_state (
               condition_id TEXT PRIMARY KEY,
@@ -411,6 +413,35 @@ def get_all_buy_trades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY timestamp DESC
         """
     ).fetchall()
+
+
+def get_buy_trades_for_wallets(
+    conn: sqlite3.Connection,
+    *,
+    wallets: list[str],
+    chunk_size: int = 900,
+) -> list[sqlite3.Row]:
+    if not wallets:
+        return []
+    wallets_lc = sorted({w.lower() for w in wallets if w})
+    rows: list[sqlite3.Row] = []
+    for i in range(0, len(wallets_lc), chunk_size):
+        chunk = wallets_lc[i : i + chunk_size]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
+                FROM trades
+                WHERE side = 'BUY' AND wallet IN ({placeholders})
+                ORDER BY timestamp DESC
+                """,
+                chunk,
+            ).fetchall()
+        )
+    return rows
 
 
 def replace_market_state(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
@@ -1461,28 +1492,27 @@ def get_trades_in_timerange(
     *,
     start_ts: int,
     end_ts: int | None = None,
+    side: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get all trades within a time range for backtesting."""
-    if end_ts:
-        rows = conn.execute(
-            """
-            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
-            FROM trades
-            WHERE timestamp >= ? AND timestamp <= ?
-            ORDER BY timestamp ASC
-            """,
-            (start_ts, end_ts),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
-            FROM trades
-            WHERE timestamp >= ?
-            ORDER BY timestamp ASC
-            """,
-            (start_ts,),
-        ).fetchall()
+    clauses = ["timestamp >= ?"]
+    params: list[Any] = [start_ts]
+    if end_ts is not None:
+        clauses.append("timestamp <= ?")
+        params.append(end_ts)
+    if side is not None:
+        clauses.append("side = ?")
+        params.append(side)
+    where_clause = " AND ".join(clauses)
+    rows = conn.execute(
+        f"""
+        SELECT wallet, condition_id, outcome, side, price, size, timestamp, asset_id, title, slug, event_slug
+        FROM trades
+        WHERE {where_clause}
+        ORDER BY timestamp ASC
+        """,
+        params,
+    ).fetchall()
     
     return [
         {

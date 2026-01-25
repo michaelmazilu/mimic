@@ -586,12 +586,12 @@ async def run_backtest(
     result = BacktestResult(run_id=run_id, config=config)
     
     try:
-        # Step 1: Get historical trades (READ ONLY - releases lock immediately)
+        # Step 1: Get historical BUY trades (READ ONLY - releases lock immediately)
         now = int(time.time())
         lookback_start = now - (config.lookback_days * 24 * 60 * 60)
         
         # Read trades and immediately release the connection
-        all_trades = db.get_trades_in_timerange(conn, start_ts=lookback_start)
+        all_trades = db.get_trades_in_timerange(conn, start_ts=lookback_start, side="BUY")
 
         accuracy_map = db.get_wallet_accuracy_map(conn)
         perf_map = db.get_wallet_performance_map(conn)

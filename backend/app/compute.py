@@ -191,8 +191,8 @@ async def compute_and_store(
     client: Any,
     sem: asyncio.Semaphore,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    wallet_set = {w.lower() for w in wallets}
-    buy_rows = db.get_all_buy_trades(conn)
+    wallets_lc = sorted({w.lower() for w in wallets if w})
+    buy_rows = db.get_buy_trades_for_wallets(conn, wallets=wallets_lc)
     
     # Get accuracy map for weighting
     accuracy_map = db.get_wallet_accuracy_map(conn)
@@ -207,18 +207,24 @@ async def compute_and_store(
     latest_buy: dict[tuple[str, str], dict[str, Any]] = {}
     for r in buy_rows:
         w = str(r["wallet"]).lower()
-        if w not in wallet_set:
-            continue
         condition_id = str(r["condition_id"])
         key = (w, condition_id)
-        if key in latest_buy:
-            continue
+        ts = r["timestamp"]
+        prev = latest_buy.get(key)
+        if prev is not None:
+            prev_ts = prev.get("timestamp")
+            if prev_ts is None:
+                if ts is None:
+                    continue
+            else:
+                if ts is None or ts <= prev_ts:
+                    continue
         latest_buy[key] = {
             "wallet": w,
             "condition_id": condition_id,
             "outcome": r["outcome"],
             "price": _safe_float(r["price"]),
-            "timestamp": r["timestamp"],
+            "timestamp": ts,
             "asset_id": r["asset_id"],
             "title": r["title"],
             "slug": r["slug"],
@@ -388,9 +394,9 @@ async def compute_and_store(
 
     # Clusters
     trades_by_wallet: dict[str, list[dict[str, Any]]] = {}
-    for w in wallets:
+    for w in wallets_lc:
         rows = db.get_recent_trades_by_wallet(conn, wallet=w, limit=50)
-        trades_by_wallet[w.lower()] = [
+        trades_by_wallet[w] = [
             {
                 "condition_id": row["condition_id"],
                 "outcome": row["outcome"],

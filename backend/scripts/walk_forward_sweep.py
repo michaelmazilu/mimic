@@ -500,7 +500,7 @@ def main() -> int:
     lookback_start = now - (args.lookback_days * 24 * 60 * 60)
 
     with db.db_conn(settings.db_path) as conn:
-        trades = db.get_trades_in_timerange(conn, start_ts=lookback_start)
+        trades = db.get_trades_in_timerange(conn, start_ts=lookback_start, side="BUY")
         if not trades:
             print("No trades found in lookback window.")
             return 1
