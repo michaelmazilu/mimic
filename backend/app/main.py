@@ -10,7 +10,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import backtest, compute, db, ingest, wallet_selection
+from . import backtest, compute, db, ingest, paper, wallet_selection
 from .config import Settings, get_settings
 from .models import (
     BacktestConfigModel,
@@ -20,6 +20,10 @@ from .models import (
     HealthResponse,
     MarketDetailResponse,
     MarketSummary,
+    PaperStateResponse,
+    PaperTradeModel,
+    PaperTradesResponse,
+    PaperStats,
     RefreshResponse,
     StateResponse,
     TradeItem,
@@ -214,15 +218,21 @@ class RefreshManager:
 
                     with db.db_conn(self.settings.db_path) as conn:
                         cached_resolutions = db.get_all_resolutions(conn)
+                        open_paper_conditions = (
+                            db.get_open_paper_conditions(conn)
+                            if self.settings.paper_enabled
+                            else []
+                        )
 
-                    condition_ids = sorted(
-                        {
-                            str(t.get("conditionId") or t.get("condition_id"))
-                            for trades in trades_by_wallet.values()
-                            for t in trades
-                            if t.get("conditionId") or t.get("condition_id")
-                        }
-                    )
+                    condition_ids = {
+                        str(t.get("conditionId") or t.get("condition_id"))
+                        for trades in trades_by_wallet.values()
+                        for t in trades
+                        if t.get("conditionId") or t.get("condition_id")
+                    }
+                    if open_paper_conditions:
+                        condition_ids.update(open_paper_conditions)
+                    condition_ids = sorted(condition_ids)
                     missing_ids = [cid for cid in condition_ids if cid not in cached_resolutions]
                     fetched_resolutions: dict[str, str] = {}
                     if missing_ids:
@@ -303,13 +313,21 @@ class RefreshManager:
                         if stats_rows:
                             db.bulk_upsert_wallet_stats(conn, stats_rows)
 
-                        await compute.compute_and_store(
+                        market_rows, _ = await compute.compute_and_store(
                             conn,
                             self.settings,
                             wallets=selected_wallets,
                             client=client,
                             sem=sem,
                         )
+                        if self.settings.paper_enabled:
+                            paper.process_paper_trades(
+                                conn,
+                                self.settings,
+                                market_rows=market_rows,
+                                resolutions=resolutions,
+                                now_ts=now,
+                            )
                         db.set_last_refresh_ts(conn, now)
 
                 state = self._load_state_from_db()
@@ -549,6 +567,73 @@ async def get_wallet(address: str) -> WalletStatsResponse:
         stats=stats,
         recentOutcomes=outcomes_raw,
     )
+
+
+# ============================================================================
+# Paper Trading Endpoints
+# ============================================================================
+
+
+@app.get("/paper/state", response_model=PaperStateResponse)
+async def get_paper_state() -> PaperStateResponse:
+    with db.db_conn(settings.db_path) as conn:
+        stats = db.get_paper_stats(conn)
+        meta = paper.get_paper_meta(conn, settings)
+
+    paper_stats = PaperStats(
+        totalTrades=stats.get("total_trades", 0),
+        winningTrades=stats.get("winning_trades", 0),
+        losingTrades=stats.get("losing_trades", 0),
+        pendingTrades=stats.get("pending_trades", 0),
+        winRate=stats.get("win_rate", 0.0),
+        totalPnl=stats.get("total_pnl", 0.0),
+        totalInvested=stats.get("total_invested", 0.0),
+        roi=stats.get("roi", 0.0),
+    )
+
+    return PaperStateResponse(
+        enabled=settings.paper_enabled,
+        startTs=meta.get("start_ts"),
+        windowEndTs=meta.get("window_end_ts"),
+        bankroll=meta.get("bankroll", 0.0),
+        stats=paper_stats,
+    )
+
+
+@app.get("/paper/trades", response_model=PaperTradesResponse)
+async def list_paper_trades(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> PaperTradesResponse:
+    with db.db_conn(settings.db_path) as conn:
+        trades_raw = db.get_paper_trades(conn, status=status, limit=limit)
+
+    trades = [
+        PaperTradeModel(
+            id=t["id"],
+            conditionId=t["condition_id"],
+            title=t.get("title"),
+            predictedOutcome=t["predicted_outcome"],
+            confidenceScore=t["confidence_score"],
+            consensusPercent=t.get("consensus_percent"),
+            weightedConsensusPercent=t.get("weighted_consensus_percent"),
+            participants=t.get("participants"),
+            totalParticipants=t.get("total_participants"),
+            weightedParticipants=t.get("weighted_participants"),
+            meanEntry=t.get("mean_entry"),
+            midpoint=t.get("midpoint"),
+            entryPrice=t.get("entry_price"),
+            betSize=t["bet_size"],
+            status=t["status"],
+            actualOutcome=t.get("actual_outcome"),
+            pnl=t.get("pnl"),
+            entryTimestamp=t["entry_timestamp"],
+            resolvedTimestamp=t.get("resolved_timestamp"),
+        )
+        for t in trades_raw
+    ]
+
+    return PaperTradesResponse(trades=trades)
 
 
 # ============================================================================

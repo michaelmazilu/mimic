@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from . import db
+from . import db, wallet_selection
 from .config import Settings
 from .market_filters import is_sports_market
 # Resolution fetching is now done inline per-market
@@ -561,6 +561,36 @@ def build_equity_curve(trades: list[BacktestTrade]) -> list[dict[str, Any]]:
     return curve
 
 
+def _select_wallets_for_backtest(
+    trades: list[dict[str, Any]],
+    resolutions: dict[str, str],
+    *,
+    now_ts: int,
+    settings: Settings,
+) -> set[str]:
+    if not trades or not resolutions:
+        return set()
+    selection_cfg = wallet_selection.SelectionConfig()
+    trades_by_wallet: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for trade in trades:
+        wallet = trade.get("wallet")
+        if not wallet:
+            continue
+        trades_by_wallet[str(wallet).lower()].append(trade)
+    wallet_metrics = wallet_selection.compute_wallet_metrics(
+        trades_by_wallet,
+        resolutions,
+        now_ts=now_ts,
+        config=selection_cfg,
+    )
+    selected = wallet_selection.select_wallets_by_accuracy(
+        wallet_metrics.values(),
+        limit=settings.n_wallets,
+        config=selection_cfg,
+    )
+    return {str(w).lower() for w in selected}
+
+
 async def run_backtest(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -655,6 +685,47 @@ async def run_backtest(
         for i in range(0, len(condition_ids), batch_size):
             batch = condition_ids[i:i + batch_size]
             await asyncio.gather(*[fetch_market_resolution(cid) for cid in batch])
+
+        selected_wallets = _select_wallets_for_backtest(
+            all_trades,
+            resolutions,
+            now_ts=now,
+            settings=settings,
+        )
+        if selected_wallets:
+            all_trades = [
+                t for t in all_trades
+                if str(t.get("wallet") or "").lower() in selected_wallets
+            ]
+            accuracy_map = {
+                w: v for w, v in accuracy_map.items() if w in selected_wallets
+            }
+            perf_map = {
+                w: v for w, v in perf_map.items() if w in selected_wallets
+            }
+            perfect_wallets = {w for w in perfect_wallets if w in selected_wallets}
+        else:
+            all_trades = []
+            accuracy_map = {}
+            perf_map = {}
+            perfect_wallets = set()
+
+        if not all_trades:
+            for attempt in range(5):
+                try:
+                    db.create_backtest_run(conn, run_id, config.to_dict())
+                    db.update_backtest_run(conn, run_id, status="completed")
+                    conn.commit()
+                    break
+                except Exception:
+                    await asyncio.sleep(1)
+            return result
+
+        trades_by_condition = defaultdict(list)
+        for t in all_trades:
+            cid = t.get("condition_id")
+            if cid:
+                trades_by_condition[cid].append(t)
         
         # Step 3: Generate candidate signals for each market (EV gating after calibration)
         candidate_signals: list[dict[str, Any]] = []

@@ -176,3 +176,53 @@ class BacktestRunResponse(BaseModel):
     profitFactor: float = 0.0
     trades: list[BacktestTradeModel] = Field(default_factory=list)
     equityCurve: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ============================================================================
+# Paper Trading Models
+# ============================================================================
+
+
+class PaperTradeModel(BaseModel):
+    id: int
+    conditionId: str
+    title: str | None = None
+    predictedOutcome: str
+    confidenceScore: float
+    consensusPercent: float | None = None
+    weightedConsensusPercent: float | None = None
+    participants: int | None = None
+    totalParticipants: int | None = None
+    weightedParticipants: float | None = None
+    meanEntry: float | None = None
+    midpoint: float | None = None
+    entryPrice: float | None = None
+    betSize: float
+    status: str
+    actualOutcome: str | None = None
+    pnl: float | None = None
+    entryTimestamp: int
+    resolvedTimestamp: int | None = None
+
+
+class PaperStats(BaseModel):
+    totalTrades: int = 0
+    winningTrades: int = 0
+    losingTrades: int = 0
+    pendingTrades: int = 0
+    winRate: float = 0.0
+    totalPnl: float = 0.0
+    totalInvested: float = 0.0
+    roi: float = 0.0
+
+
+class PaperStateResponse(BaseModel):
+    enabled: bool
+    startTs: int | None = None
+    windowEndTs: int | None = None
+    bankroll: float = 0.0
+    stats: PaperStats = Field(default_factory=PaperStats)
+
+
+class PaperTradesResponse(BaseModel):
+    trades: list[PaperTradeModel] = Field(default_factory=list)

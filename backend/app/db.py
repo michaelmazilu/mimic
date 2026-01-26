@@ -212,6 +212,35 @@ def init_db(db_path: str) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
             CREATE INDEX IF NOT EXISTS idx_backtest_trades_timestamp ON backtest_trades(signal_timestamp DESC);
+
+            -- Store live paper-trading signals and outcomes
+            CREATE TABLE IF NOT EXISTS paper_trades (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              condition_id TEXT NOT NULL,
+              title TEXT,
+              predicted_outcome TEXT NOT NULL,
+              confidence_score REAL NOT NULL,
+              consensus_percent REAL,
+              weighted_consensus_percent REAL,
+              participants INTEGER,
+              total_participants INTEGER,
+              weighted_participants REAL,
+              mean_entry REAL,
+              midpoint REAL,
+              entry_price REAL,
+              bet_size REAL NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',  -- pending, won, lost
+              actual_outcome TEXT,
+              pnl REAL,
+              entry_timestamp INTEGER NOT NULL,
+              resolved_timestamp INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
+            CREATE INDEX IF NOT EXISTS idx_paper_trades_condition ON paper_trades(condition_id);
+            CREATE INDEX IF NOT EXISTS idx_paper_trades_entry_ts ON paper_trades(entry_timestamp DESC);
             """
         )
 
@@ -1543,3 +1572,230 @@ def get_unique_condition_ids_in_trades(conn: sqlite3.Connection, start_ts: int) 
         (start_ts,),
     ).fetchall()
     return [r["condition_id"] for r in rows]
+
+
+# ============================================================================
+# Paper Trading Functions
+# ============================================================================
+
+
+def get_open_paper_conditions(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT condition_id FROM paper_trades WHERE status = 'pending'"
+    ).fetchall()
+    return [str(r["condition_id"]) for r in rows]
+
+
+def get_open_paper_trades(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, condition_id, title, predicted_outcome, confidence_score,
+               consensus_percent, weighted_consensus_percent, participants,
+               total_participants, weighted_participants, mean_entry, midpoint,
+               entry_price, bet_size, status, actual_outcome, pnl,
+               entry_timestamp, resolved_timestamp, created_at, updated_at
+        FROM paper_trades
+        WHERE status = 'pending'
+        ORDER BY entry_timestamp ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "condition_id": r["condition_id"],
+            "title": r["title"],
+            "predicted_outcome": r["predicted_outcome"],
+            "confidence_score": r["confidence_score"],
+            "consensus_percent": r["consensus_percent"],
+            "weighted_consensus_percent": r["weighted_consensus_percent"],
+            "participants": r["participants"],
+            "total_participants": r["total_participants"],
+            "weighted_participants": r["weighted_participants"],
+            "mean_entry": r["mean_entry"],
+            "midpoint": r["midpoint"],
+            "entry_price": r["entry_price"],
+            "bet_size": r["bet_size"],
+            "status": r["status"],
+            "actual_outcome": r["actual_outcome"],
+            "pnl": r["pnl"],
+            "entry_timestamp": r["entry_timestamp"],
+            "resolved_timestamp": r["resolved_timestamp"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+def insert_paper_trade(
+    conn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    title: str | None,
+    predicted_outcome: str,
+    confidence_score: float,
+    consensus_percent: float | None,
+    weighted_consensus_percent: float | None,
+    participants: int | None,
+    total_participants: int | None,
+    weighted_participants: float | None,
+    mean_entry: float | None,
+    midpoint: float | None,
+    entry_price: float | None,
+    bet_size: float,
+    entry_timestamp: int,
+) -> None:
+    now = _utc_ts()
+    conn.execute(
+        """
+        INSERT INTO paper_trades(
+          condition_id, title, predicted_outcome, confidence_score,
+          consensus_percent, weighted_consensus_percent, participants, total_participants,
+          weighted_participants, mean_entry, midpoint, entry_price, bet_size,
+          status, actual_outcome, pnl, entry_timestamp, resolved_timestamp,
+          created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, ?, ?)
+        """,
+        (
+            condition_id,
+            title,
+            predicted_outcome,
+            confidence_score,
+            consensus_percent,
+            weighted_consensus_percent,
+            participants,
+            total_participants,
+            weighted_participants,
+            mean_entry,
+            midpoint,
+            entry_price,
+            bet_size,
+            entry_timestamp,
+            now,
+            now,
+        ),
+    )
+
+
+def resolve_paper_trade(
+    conn: sqlite3.Connection,
+    trade_id: int,
+    *,
+    status: str,
+    actual_outcome: str,
+    pnl: float,
+    resolved_timestamp: int,
+) -> None:
+    now = _utc_ts()
+    conn.execute(
+        """
+        UPDATE paper_trades
+        SET status = ?,
+            actual_outcome = ?,
+            pnl = ?,
+            resolved_timestamp = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (status, actual_outcome, pnl, resolved_timestamp, now, trade_id),
+    )
+
+
+def get_paper_trades(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    if status:
+        rows = conn.execute(
+            """
+            SELECT id, condition_id, title, predicted_outcome, confidence_score,
+                   consensus_percent, weighted_consensus_percent, participants,
+                   total_participants, weighted_participants, mean_entry, midpoint,
+                   entry_price, bet_size, status, actual_outcome, pnl,
+                   entry_timestamp, resolved_timestamp, created_at, updated_at
+            FROM paper_trades
+            WHERE status = ?
+            ORDER BY entry_timestamp DESC
+            LIMIT ?
+            """,
+            (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, condition_id, title, predicted_outcome, confidence_score,
+                   consensus_percent, weighted_consensus_percent, participants,
+                   total_participants, weighted_participants, mean_entry, midpoint,
+                   entry_price, bet_size, status, actual_outcome, pnl,
+                   entry_timestamp, resolved_timestamp, created_at, updated_at
+            FROM paper_trades
+            ORDER BY entry_timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "condition_id": r["condition_id"],
+            "title": r["title"],
+            "predicted_outcome": r["predicted_outcome"],
+            "confidence_score": r["confidence_score"],
+            "consensus_percent": r["consensus_percent"],
+            "weighted_consensus_percent": r["weighted_consensus_percent"],
+            "participants": r["participants"],
+            "total_participants": r["total_participants"],
+            "weighted_participants": r["weighted_participants"],
+            "mean_entry": r["mean_entry"],
+            "midpoint": r["midpoint"],
+            "entry_price": r["entry_price"],
+            "bet_size": r["bet_size"],
+            "status": r["status"],
+            "actual_outcome": r["actual_outcome"],
+            "pnl": r["pnl"],
+            "entry_timestamp": r["entry_timestamp"],
+            "resolved_timestamp": r["resolved_timestamp"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+def get_paper_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+          COUNT(1) AS total,
+          SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) AS won,
+          SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) AS lost,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN status IN ('won', 'lost') THEN COALESCE(pnl, 0) ELSE 0 END) AS total_pnl,
+          SUM(CASE WHEN status IN ('won', 'lost') THEN COALESCE(bet_size, 0) ELSE 0 END) AS total_invested
+        FROM paper_trades
+        """
+    ).fetchone()
+
+    total = int(row["total"] or 0) if row else 0
+    won = int(row["won"] or 0) if row else 0
+    lost = int(row["lost"] or 0) if row else 0
+    pending = int(row["pending"] or 0) if row else 0
+    total_pnl = float(row["total_pnl"] or 0.0) if row else 0.0
+    total_invested = float(row["total_invested"] or 0.0) if row else 0.0
+    resolved = won + lost
+    win_rate = (won / resolved) if resolved > 0 else 0.0
+    roi = (total_pnl / total_invested) if total_invested > 0 else 0.0
+
+    return {
+        "total_trades": total,
+        "winning_trades": won,
+        "losing_trades": lost,
+        "pending_trades": pending,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "total_invested": total_invested,
+        "roi": roi,
+    }

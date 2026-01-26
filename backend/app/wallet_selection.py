@@ -16,7 +16,8 @@ class BotFilterConfig:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    min_accuracy: float = 0.70
+    min_accuracy: float = 0.0515
+    min_avg_roi: float = 0.288
     min_resolved_trades: int = 20
     max_sports_ratio: float = 0.05
     allow_fallback: bool = False
@@ -233,6 +234,7 @@ def select_wallets_by_accuracy(
         return (
             not m.is_bot
             and m.accuracy_lb >= config.min_accuracy
+            and m.avg_roi >= config.min_avg_roi
             and m.sports_ratio <= config.max_sports_ratio
             and m.resolved_trades >= config.min_resolved_trades
         )
@@ -257,7 +259,10 @@ def select_wallets_by_accuracy(
     # Fallback: include non-bots with any resolved trades.
     fallback = [
         m for m in metrics_list
-        if not m.is_bot and m.sports_ratio <= config.max_sports_ratio and m.resolved_trades > 0
+        if not m.is_bot
+        and m.avg_roi >= config.min_avg_roi
+        and m.sports_ratio <= config.max_sports_ratio
+        and m.resolved_trades > 0
         and m.wallet not in {e.wallet for e in eligible}
     ]
     fallback.sort(key=sort_key, reverse=True)
@@ -269,7 +274,9 @@ def select_wallets_by_accuracy(
     # Final fallback: any non-bot wallets sorted by resolved trades then total trades.
     tail = [
         m for m in metrics_list
-        if not m.is_bot and m.wallet not in {c.wallet for c in combined}
+        if not m.is_bot
+        and m.avg_roi >= config.min_avg_roi
+        and m.wallet not in {c.wallet for c in combined}
     ]
     tail.sort(key=lambda m: (m.resolved_trades, m.total_trades), reverse=True)
     combined.extend(tail)
